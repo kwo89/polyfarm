@@ -247,8 +247,8 @@ def api_add_bot(name: str, wallet: str, our_capital: float, poll_interval: int =
     return {"success": True, "message": f"Bot '{name}' registered. It will start tracking within 30 seconds."}
 
 
-def api_update_bot(bot_id: str, action: str) -> dict:
-    """pause | unpause | deactivate"""
+def api_update_bot(bot_id: str, action: str, new_name: str = "") -> dict:
+    """pause | unpause | deactivate | rename"""
     with get_session() as session:
         bot = session.get(BotRegistry, bot_id)
         if not bot:
@@ -260,6 +260,17 @@ def api_update_bot(bot_id: str, action: str) -> dict:
             bot.paused = False
         elif action == "deactivate":
             bot.active = False
+        elif action == "rename":
+            new_name = new_name.strip()
+            if not new_name:
+                return {"error": "New name cannot be empty."}
+            dup = session.execute(
+                select(BotRegistry).where(BotRegistry.name == new_name).where(BotRegistry.id != bot_id)
+            ).scalar_one_or_none()
+            if dup:
+                return {"error": f"Name '{new_name}' is already taken."}
+            bot.name = new_name
+            return {"success": True, "message": f"Bot renamed to '{new_name}'."}
         else:
             return {"error": f"Unknown action: {action}"}
     return {"success": True, "message": f"Bot '{name}' {action}d."}
@@ -350,7 +361,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/update_bot":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
-            self._json(api_update_bot(body.get("bot_id", ""), body.get("action", "")))
+            self._json(api_update_bot(body.get("bot_id", ""), body.get("action", ""), body.get("new_name", "")))
 
         elif parsed.path == "/api/chat":
             length = int(self.headers.get("Content-Length", 0))
@@ -1100,6 +1111,7 @@ async function loadBots() {
       ? (b.paused
           ? `<button class="btn-sm btn-resume"  onclick="updateBot('${b.id}','unpause')">Resume</button>`
           : `<button class="btn-sm btn-pause"   onclick="updateBot('${b.id}','pause')">Pause</button>`)
+        + `<button class="btn-sm" style="background:rgba(99,102,241,.12);color:var(--accent);border:1px solid rgba(99,102,241,.3)" onclick="renameBot('${b.id}','${b.name}')">Rename</button>`
         + `<button class="btn-sm btn-deactivate" onclick="confirmDeactivate('${b.id}','${b.name}')">Deactivate</button>`
         + `<a href="https://polymarket.com/profile/${b.target}" target="_blank" rel="noopener"
               style="display:inline-flex;align-items:center;padding:4px 10px;border-radius:5px;font-size:11px;font-weight:600;background:rgba(99,102,241,.12);color:var(--accent);border:1px solid rgba(99,102,241,.3);text-decoration:none">View ↗</a>`
@@ -1173,6 +1185,18 @@ function confirmDeactivate(botId, name) {
   if (confirm('Deactivate "' + name + '"? It will stop tracking but all trade history is kept.')) {
     updateBot(botId, 'deactivate');
   }
+}
+
+async function renameBot(botId, currentName) {
+  const newName = prompt('Rename "' + currentName + '" to:', currentName);
+  if (!newName || newName.trim() === currentName) return;
+  const res = await fetch('/api/update_bot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bot_id: botId, action: 'rename', new_name: newName.trim() }),
+  }).then(r => r.json());
+  if (res.error) alert(res.error);
+  else loadBots();
 }
 
 // Allow Enter key to submit form
