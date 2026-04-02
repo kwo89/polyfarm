@@ -1,0 +1,22 @@
+# Secrets — never commit
+.env
+
+# Database
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Claude Code
+.claude/
+
+# OS
+.DS_Store
