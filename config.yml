@@ -1,0 +1,43 @@
+# PolyFarm configuration
+# Edit this file to change bot names, risk settings, and operational config.
+# Wallet addresses and secrets stay in .env — never here.
+# After editing: docker compose restart bots
+
+# ── Bots ──────────────────────────────────────────────────────────────────────
+# Each bot needs a matching BOT_<NAME>_TARGET_WALLET and
+# BOT_<NAME>_TARGET_CAPITAL in .env (uppercased name, spaces → underscores).
+# Example: name "Bot-1" → BOT_BOT-1_TARGET_WALLET in .env
+# Simpler: keep names short and uppercase-friendly (Bot1, Alpha, Scout, etc.)
+
+bots:
+  - name: Bot1
+    poll_interval_sec: 30
+    paper_mode: true
+    active: true
+    notes: "BTC Up/Down 5-min markets. Scaling ~3.8%."
+
+  # - name: Bot2
+  #   poll_interval_sec: 30
+  #   paper_mode: true
+  #   active: false
+  #   notes: "Disabled — pending review"
+
+# ── Portfolio ─────────────────────────────────────────────────────────────────
+portfolio:
+  initial_usd: 100
+
+# ── Risk rules ────────────────────────────────────────────────────────────────
+risk:
+  min_trade_size_usd: 1.00        # skip trades below this
+  max_trade_pct: 0.08             # max 8% of portfolio per trade
+  max_market_pct: 0.25            # max 25% exposure in one market
+  min_liquid_reserve_usd: 15.00   # always keep this much undeployed
+  daily_loss_limit_pct: 0.20      # halt bot if down >20% on the day
+  max_concurrent_markets: 20
+  order_cancel_after_sec: 30
+  max_price_drift_pct: 0.05       # skip if price moved >5% before fill
+
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+dashboard:
+  port: 8080
+  auto_refresh_sec: 30

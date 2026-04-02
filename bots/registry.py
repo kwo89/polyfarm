@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from core.database import get_session, init_db
 from core.models import BotRegistry
+from core.config_loader import sync_bots_from_config
 from bots.base_bot import CopyBot
 
 logging.basicConfig(
@@ -78,4 +79,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     init_db()
+    sync_bots_from_config()   # sync config.yml → DB before starting bots
     run_all_bots(bot_id=args.bot_id)
