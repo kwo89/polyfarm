@@ -206,6 +206,82 @@ def get_dashboard_data(days: int = 7) -> dict:
     }
 
 
+# ── Bot management ────────────────────────────────────────────────────────────
+
+def api_add_bot(name: str, wallet: str, our_capital: float, poll_interval: int = 30) -> dict:
+    name   = name.strip()
+    wallet = wallet.strip()
+
+    if not name:
+        return {"error": "Bot name is required."}
+    if not wallet.startswith("0x") or len(wallet) != 42:
+        return {"error": "Invalid wallet address — must start with 0x and be 42 characters."}
+    if our_capital <= 0:
+        return {"error": "Starting capital must be greater than $0."}
+
+    with get_session() as session:
+        dup_wallet = session.execute(
+            select(BotRegistry).where(func.lower(BotRegistry.target_address) == wallet.lower())
+        ).scalar_one_or_none()
+        if dup_wallet:
+            return {"error": f"Wallet already registered as '{dup_wallet.name}'."}
+
+        dup_name = session.execute(
+            select(BotRegistry).where(BotRegistry.name == name)
+        ).scalar_one_or_none()
+        if dup_name:
+            return {"error": f"Bot name '{name}' is already taken."}
+
+        from core.models import BotRegistry as BR
+        session.add(BR(
+            name=name,
+            target_address=wallet,
+            active=True,
+            paper_mode=True,
+            poll_interval_sec=poll_interval,
+            target_daily_capital=2000.0,   # seed — calibrator updates within minutes
+            our_capital=our_capital,
+            total_trades=0,
+        ))
+
+    return {"success": True, "message": f"Bot '{name}' registered. It will start tracking within 30 seconds."}
+
+
+def api_update_bot(bot_id: str, action: str) -> dict:
+    """pause | unpause | deactivate"""
+    with get_session() as session:
+        bot = session.get(BotRegistry, bot_id)
+        if not bot:
+            return {"error": "Bot not found."}
+        name = bot.name
+        if action == "pause":
+            bot.paused = True
+        elif action == "unpause":
+            bot.paused = False
+        elif action == "deactivate":
+            bot.active = False
+        else:
+            return {"error": f"Unknown action: {action}"}
+    return {"success": True, "message": f"Bot '{name}' {action}d."}
+
+
+def get_all_bots() -> list:
+    with get_session() as session:
+        bots = session.execute(select(BotRegistry).order_by(BotRegistry.active.desc())).scalars().all()
+        return [
+            {
+                "id": b.id, "name": b.name, "target": b.target_address,
+                "active": b.active, "paused": b.paused, "paper_mode": b.paper_mode,
+                "our_capital": b.our_capital or 0,
+                "target_daily_capital": b.target_daily_capital or 0,
+                "ratio_pct": round((b.our_capital or 0) / (b.target_daily_capital or 1) * 100, 2),
+                "total_trades": b.total_trades or 0,
+                "last_activity": b.last_activity_at.strftime("%Y-%m-%d %H:%M UTC") if b.last_activity_at else "Never",
+            }
+            for b in bots
+        ]
+
+
 # ── HTTP handler ──────────────────────────────────────────────────────────────
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -238,11 +314,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"memory": "", "error": str(e)})
 
+        elif parsed.path == "/api/bots":
+            self._json({"bots": get_all_bots()})
+
         elif parsed.path in ("/", "/index.html"):
             self._html(DASHBOARD_HTML)
 
         elif parsed.path == "/chat":
             self._html(CHAT_HTML)
+
+        elif parsed.path == "/bots":
+            self._html(BOTS_HTML)
 
         else:
             self.send_response(404)
@@ -255,7 +337,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         parsed = urlparse(self.path)
 
-        if parsed.path == "/api/chat":
+        if parsed.path == "/api/add_bot":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            self._json(api_add_bot(
+                name=body.get("name", ""),
+                wallet=body.get("wallet", ""),
+                our_capital=float(body.get("our_capital", 0)),
+                poll_interval=int(body.get("poll_interval", 30)),
+            ))
+
+        elif parsed.path == "/api/update_bot":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            self._json(api_update_bot(body.get("bot_id", ""), body.get("action", "")))
+
+        elif parsed.path == "/api/chat":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
             messages = body.get("messages", [])
@@ -312,6 +409,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .nav a{padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;border:1px solid var(--border);background:var(--surface2);color:var(--text);text-decoration:none}
   .nav a:hover{background:var(--border)}
   .nav a.active{border-color:var(--accent);color:var(--accent);background:rgba(99,102,241,.1)}
+  .nav a.green{border-color:var(--green);color:var(--green);background:rgba(34,197,94,.1)}
   .badge{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:12px;font-weight:600}
   .badge.paper{background:rgba(99,102,241,.15);color:var(--accent);border:1px solid rgba(99,102,241,.3)}
   .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
@@ -358,7 +456,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="header">
     <h1>Poly<span>Farm</span></h1>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <div class="nav"><a href="/" class="active">Dashboard</a><a href="/chat">CEO Chat</a></div>
+      <div class="nav"><a href="/" class="active">Dashboard</a><a href="/bots">Manage Bots</a><a href="/chat">CEO Chat</a></div>
       <div id="mode-badge" class="badge paper"><div class="dot"></div> PAPER</div>
       <span id="refresh-tag" class="refresh-tag">—</span>
     </div>
@@ -774,7 +872,7 @@ CHAT_HTML = """<!DOCTYPE html>
 <div class="layout">
   <div class="header">
     <h1>Poly<span>Farm</span> <span style="font-weight:400;color:var(--muted);font-size:14px">CEO</span></h1>
-    <div class="nav"><a href="/">Dashboard</a><a href="/chat" class="active">CEO Chat</a></div>
+    <div class="nav"><a href="/">Dashboard</a><a href="/bots">Manage Bots</a><a href="/chat" class="active">CEO Chat</a></div>
   </div>
 
   <div class="messages" id="messages">
@@ -865,6 +963,226 @@ async function send(text) {
 function esc(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
 }
+</script>
+</body>
+</html>"""
+
+
+# ── Bot management HTML ───────────────────────────────────────────────────────
+
+BOTS_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PolyFarm — Manage Bots</title>
+<style>
+  :root{--bg:#0f1117;--surface:#1a1d27;--surface2:#22263a;--border:#2e3347;--text:#e2e8f0;--muted:#8892a4;--green:#22c55e;--red:#ef4444;--yellow:#f59e0b;--blue:#3b82f6;--accent:#6366f1;--r:10px;--font:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:14px}
+  .container{max-width:960px;margin:0 auto;padding:16px}
+  .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:10px}
+  .header h1{font-size:20px;font-weight:700}.header h1 span{color:var(--accent)}
+  .nav{display:flex;gap:8px}
+  .nav a{padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;border:1px solid var(--border);background:var(--surface2);color:var(--text);text-decoration:none}
+  .nav a:hover{background:var(--border)}
+  .nav a.active{border-color:var(--accent);color:var(--accent);background:rgba(99,102,241,.1)}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:24px;margin-bottom:20px}
+  .card-title{font-size:15px;font-weight:700;margin-bottom:20px;display:flex;align-items:center;gap:8px}
+  .form-grid{display:grid;grid-template-columns:1fr 2fr 1fr 1fr;gap:12px;align-items:end}
+  @media(max-width:700px){.form-grid{grid-template-columns:1fr}}
+  .field label{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;font-weight:600}
+  .field input{width:100%;padding:9px 12px;border-radius:7px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:14px;outline:none;transition:border .15s}
+  .field input:focus{border-color:var(--accent)}
+  .field input::placeholder{color:var(--muted)}
+  .btn{padding:9px 20px;border-radius:7px;font-size:13px;font-weight:600;cursor:pointer;border:none;transition:opacity .15s}
+  .btn:hover{opacity:.85}.btn:disabled{opacity:.4;cursor:not-allowed}
+  .btn-primary{background:var(--accent);color:#fff}
+  .btn-sm{padding:4px 12px;font-size:11px;font-weight:600;border-radius:5px;cursor:pointer;border:1px solid;transition:opacity .15s}
+  .btn-sm:hover{opacity:.75}
+  .btn-pause{background:rgba(245,158,11,.12);color:var(--yellow);border-color:rgba(245,158,11,.3)}
+  .btn-resume{background:rgba(34,197,94,.12);color:var(--green);border-color:rgba(34,197,94,.3)}
+  .btn-deactivate{background:rgba(239,68,68,.08);color:var(--red);border-color:rgba(239,68,68,.25)}
+  .alert{padding:12px 16px;border-radius:7px;font-size:13px;margin-bottom:16px;display:none}
+  .alert.success{background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);color:var(--green)}
+  .alert.error{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:var(--red)}
+  table{width:100%;border-collapse:collapse}
+  th{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);padding:8px 12px;text-align:left;background:var(--surface2);border-bottom:1px solid var(--border);white-space:nowrap}
+  td{padding:10px 12px;border-bottom:1px solid var(--border);font-size:13px}
+  tr:last-child td{border-bottom:none}
+  tr:hover td{background:var(--surface2)}
+  .dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:5px}
+  .dot.active{background:var(--green);box-shadow:0 0 5px var(--green)}.dot.paused{background:var(--yellow)}.dot.inactive{background:var(--muted)}
+  .pill{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600}
+  .pill.paper{background:rgba(99,102,241,.12);color:var(--accent)}
+  .pill.live{background:rgba(34,197,94,.12);color:var(--green)}
+  .mono{font-family:monospace;font-size:12px;color:var(--muted)}
+  .actions{display:flex;gap:6px;flex-wrap:wrap}
+  .hint{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>Poly<span>Farm</span> — Manage Bots</h1>
+    <div class="nav">
+      <a href="/">Dashboard</a>
+      <a href="/bots" class="active">Manage Bots</a>
+      <a href="/chat">CEO Chat</a>
+    </div>
+  </div>
+
+  <!-- Add Bot Form -->
+  <div class="card">
+    <div class="card-title">➕ Add New Bot</div>
+    <div id="form-alert" class="alert"></div>
+    <div class="form-grid">
+      <div class="field">
+        <label>Bot Name</label>
+        <input id="f-name" type="text" placeholder="e.g. Alpha" maxlength="40">
+      </div>
+      <div class="field">
+        <label>Target Wallet Address</label>
+        <input id="f-wallet" type="text" placeholder="0x... (paste from Polymarket profile URL)">
+      </div>
+      <div class="field">
+        <label>Our Capital ($)</label>
+        <input id="f-capital" type="number" placeholder="100" min="1" step="1" value="100">
+      </div>
+      <div class="field">
+        <button class="btn btn-primary" id="add-btn" onclick="addBot()">Add Bot</button>
+      </div>
+    </div>
+    <div class="hint">
+      📍 Find the wallet address in the Polymarket profile URL: <code>polymarket.com/profile/<strong>0x…</strong></code><br>
+      🤖 Bot starts in paper mode automatically. The weekly calibrator will measure the wallet's volume and tune the scaling ratio within minutes.<br>
+      💡 Scaling ratio = Your Capital ÷ Target's Daily Volume — e.g. $100 capital vs $1,000/day target = 10% of every trade copied.
+    </div>
+  </div>
+
+  <!-- Registered Bots -->
+  <div class="card" style="padding:0;overflow:hidden">
+    <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+      <div class="card-title" style="margin:0">Registered Bots</div>
+      <div id="bots-sub" style="font-size:11px;color:var(--muted)">Loading…</div>
+    </div>
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr>
+          <th>Status</th><th>Name</th><th>Wallet</th>
+          <th>Capital</th><th>Target Daily Vol</th><th>Ratio</th>
+          <th>Mode</th><th>Trades</th><th>Last Active</th><th>Actions</th>
+        </tr></thead>
+        <tbody id="bots-tbody"><tr><td colspan="10" style="text-align:center;padding:30px;color:var(--muted)">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+async function loadBots() {
+  const d = await fetch('/api/bots').then(r => r.json());
+  const bots = d.bots || [];
+  document.getElementById('bots-sub').textContent = bots.length + ' bot(s) registered';
+
+  const tb = document.getElementById('bots-tbody');
+  if (!bots.length) {
+    tb.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:30px;color:var(--muted)">No bots registered yet.</td></tr>';
+    return;
+  }
+
+  tb.innerHTML = bots.map(b => {
+    const statusLabel = !b.active ? 'Inactive' : b.paused ? 'Paused' : 'Running';
+    const dotCls      = !b.active ? 'inactive' : b.paused ? 'paused' : 'active';
+    const shortWallet = b.target.slice(0, 6) + '…' + b.target.slice(-6);
+    const ratio       = b.ratio_pct.toFixed(1) + '%';
+    const actions = b.active
+      ? (b.paused
+          ? `<button class="btn-sm btn-resume"  onclick="updateBot('${b.id}','unpause')">Resume</button>`
+          : `<button class="btn-sm btn-pause"   onclick="updateBot('${b.id}','pause')">Pause</button>`)
+        + `<button class="btn-sm btn-deactivate" onclick="confirmDeactivate('${b.id}','${b.name}')">Deactivate</button>`
+        + `<a href="https://polymarket.com/profile/${b.target}" target="_blank" rel="noopener"
+              style="display:inline-flex;align-items:center;padding:4px 10px;border-radius:5px;font-size:11px;font-weight:600;background:rgba(99,102,241,.12);color:var(--accent);border:1px solid rgba(99,102,241,.3);text-decoration:none">View ↗</a>`
+      : '<span style="color:var(--muted);font-size:11px">Deactivated</span>';
+
+    return `<tr>
+      <td><span class="dot ${dotCls}"></span>${statusLabel}</td>
+      <td style="font-weight:600">${b.name}</td>
+      <td class="mono" title="${b.target}">${shortWallet}</td>
+      <td>$${b.our_capital.toFixed(0)}</td>
+      <td style="color:var(--muted)">$${b.target_daily_capital.toFixed(0)}/day</td>
+      <td style="font-weight:600;color:var(--blue)">${ratio}</td>
+      <td><span class="pill ${b.paper_mode ? 'paper' : 'live'}">${b.paper_mode ? 'Paper' : 'Live'}</span></td>
+      <td>${b.total_trades}</td>
+      <td style="color:var(--muted);font-size:12px">${b.last_activity}</td>
+      <td><div class="actions">${actions}</div></td>
+    </tr>`;
+  }).join('');
+}
+
+function showAlert(msg, type) {
+  const el = document.getElementById('form-alert');
+  el.textContent = msg;
+  el.className = 'alert ' + type;
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 6000);
+}
+
+async function addBot() {
+  const name    = document.getElementById('f-name').value.trim();
+  const wallet  = document.getElementById('f-wallet').value.trim();
+  const capital = parseFloat(document.getElementById('f-capital').value);
+  const btn     = document.getElementById('add-btn');
+
+  if (!name || !wallet || !capital) { showAlert('Please fill in all fields.', 'error'); return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Adding…';
+
+  const res = await fetch('/api/add_bot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, wallet, our_capital: capital }),
+  }).then(r => r.json());
+
+  btn.disabled = false;
+  btn.textContent = 'Add Bot';
+
+  if (res.error) {
+    showAlert('❌ ' + res.error, 'error');
+  } else {
+    showAlert('✅ ' + res.message, 'success');
+    document.getElementById('f-name').value   = '';
+    document.getElementById('f-wallet').value = '';
+    document.getElementById('f-capital').value = '100';
+    loadBots();
+  }
+}
+
+async function updateBot(botId, action) {
+  const res = await fetch('/api/update_bot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bot_id: botId, action }),
+  }).then(r => r.json());
+  if (res.error) alert(res.error);
+  else loadBots();
+}
+
+function confirmDeactivate(botId, name) {
+  if (confirm('Deactivate "' + name + '"? It will stop tracking but all trade history is kept.')) {
+    updateBot(botId, 'deactivate');
+  }
+}
+
+// Allow Enter key to submit form
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && document.activeElement.closest && document.activeElement.closest('.form-grid')) {
+    addBot();
+  }
+});
+
+loadBots();
 </script>
 </body>
 </html>"""
