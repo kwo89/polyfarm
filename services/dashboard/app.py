@@ -318,13 +318,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .pill.yes{background:rgba(59,130,246,.12);color:var(--blue)}.pill.no{background:rgba(245,158,11,.12);color:var(--yellow)}
   .pill.pending{background:rgba(99,102,241,.12);color:var(--accent)}.pill.win{background:rgba(34,197,94,.12);color:var(--green)}.pill.loss{background:rgba(239,68,68,.12);color:var(--red)}
   .pnl.pos{color:var(--green);font-weight:600}.pnl.neg{color:var(--red);font-weight:600}
-  .bot-row{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border)}
+  .bot-row{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .15s}
+  .bot-row:hover{background:var(--surface2)}
+  .bot-row.selected{background:rgba(99,102,241,.08);border-left:3px solid var(--accent)}
   .bot-row:last-child{border-bottom:none}
   .bot-indicator{width:8px;height:8px;border-radius:50%;flex-shrink:0}
   .bot-indicator.active{background:var(--green);box-shadow:0 0 6px var(--green)}.bot-indicator.paused{background:var(--yellow)}.bot-indicator.inactive{background:var(--muted)}
   .bot-name{font-weight:600;font-size:13px}.bot-addr{font-size:11px;color:var(--muted);font-family:monospace}
   .bot-meta{display:flex;gap:16px;margin-left:auto;text-align:right}
   .bot-meta-item{font-size:11px;color:var(--muted)}.bot-meta-item span{display:block;font-size:13px;color:var(--text);font-weight:500}
+  .summary-row{display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--surface2);border-top:2px solid var(--border)}
+  .summary-row .bot-name{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.5px}
   .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   .select{padding:6px 10px;border-radius:6px;font-size:12px;border:1px solid var(--border);background:var(--surface2);color:var(--text);cursor:pointer}
   .footer{text-align:center;color:var(--muted);font-size:11px;padding:16px}
@@ -427,15 +431,16 @@ let allTrades = [];
 let filteredTrades = [];
 let currentPage = 1;
 const PAGE_SIZE = 50;
+let allData = null;
+let selectedBot = null;
 
 const fmt = (v, d=2) => v == null ? '—' : '$' + Number(v).toFixed(d);
 const fmtPct = v => v == null ? '—' : v.toFixed(1) + '%';
 const pnlCls = v => v == null ? '' : (v >= 0 ? 'pnl pos' : 'pnl neg');
 
 function statusPill(t) {
-  // Status comes from Polymarket resolution data (winning_outcome vs outcome)
-  if (t.status === 'won')     return '<span class="pill win">Won</span>';
-  if (t.status === 'lost')    return '<span class="pill loss">Lost</span>';
+  if (t.status === 'won')  return '<span class="pill win">Won</span>';
+  if (t.status === 'lost') return '<span class="pill loss">Lost</span>';
   return '<span class="pill pending">Pending</span>';
 }
 
@@ -451,66 +456,150 @@ function pnlCell(t) {
   return `<span class="${pnlCls(t.pnl)}">${t.pnl >= 0 ? '+' : ''}${fmt(t.pnl)}</span>`;
 }
 
-async function loadData() {
-  const days = document.getElementById('days-select').value;
-  const d = await fetch('/api/data?days=' + days).then(r => r.json());
+function calcStats(trades) {
+  const resolved = trades.filter(t => t.status !== 'pending');
+  const wins     = resolved.filter(t => t.status === 'won');
+  const losses   = resolved.filter(t => t.status === 'lost');
+  const totalPnl = resolved.reduce((s, t) => s + (t.pnl || 0), 0);
+  const totalVol = trades.reduce((s, t) => s + (t.value || 0), 0);
+  return {
+    paper:    trades.length,
+    resolved: resolved.length,
+    wins:     wins.length,
+    losses:   losses.length,
+    pending:  trades.length - resolved.length,
+    pnl:      totalPnl,
+    volume:   totalVol,
+    winRate:  resolved.length ? wins.length / resolved.length * 100 : null,
+  };
+}
 
-  document.getElementById('mode-badge').innerHTML = `<div class="dot"></div> ${d.trading_mode.toUpperCase()}`;
-  document.getElementById('refresh-tag').textContent = 'Updated ' + d.generated;
-
-  const s = d.stats;
-  document.getElementById('s-paper').textContent = s.total_paper;
-  document.getElementById('s-window').textContent = 'last ' + d.days + 'd';
-  document.getElementById('s-skipped').textContent = s.total_skipped;
-  document.getElementById('s-detected').textContent = 'of ' + s.total_detected + ' detected';
-  document.getElementById('s-vol').textContent = fmt(s.total_volume);
+function renderKPIs(stats, totalDetected, totalSkipped) {
+  document.getElementById('s-paper').textContent = stats.paper;
+  document.getElementById('s-skipped').textContent = totalSkipped != null ? totalSkipped : '—';
+  document.getElementById('s-detected').textContent = totalDetected != null ? 'of ' + totalDetected + ' detected' : 'filter active';
+  document.getElementById('s-vol').textContent = fmt(stats.volume);
 
   const pe = document.getElementById('s-pnl');
-  if (s.resolved_trades > 0) {
-    const sign = s.total_pnl >= 0 ? '+' : '';
-    pe.textContent = sign + fmt(s.total_pnl);
-    pe.className = 'value ' + (s.total_pnl >= 0 ? 'green' : 'red');
-    // P&L % return = total_pnl / total_volume * 100
-    const pct = s.total_volume > 0 ? (s.total_pnl / s.total_volume * 100) : null;
-    const pctEl = document.getElementById('s-pnl-pct');
+  const pctEl = document.getElementById('s-pnl-pct');
+  if (stats.resolved > 0) {
+    const sign = stats.pnl >= 0 ? '+' : '';
+    pe.textContent = sign + fmt(stats.pnl);
+    pe.className = 'value ' + (stats.pnl >= 0 ? 'green' : 'red');
+    const pct = stats.volume > 0 ? (stats.pnl / stats.volume * 100) : null;
     if (pct !== null) {
       pctEl.textContent = (pct >= 0 ? '+' : '') + pct.toFixed(1) + '% return on volume';
       pctEl.style.color = pct >= 0 ? 'var(--green)' : 'var(--red)';
-    }
+    } else { pctEl.textContent = ''; }
   } else {
-    pe.textContent = '—';
-    pe.className = 'value';
+    pe.textContent = '—'; pe.className = 'value'; pctEl.textContent = '';
   }
-  document.getElementById('s-resolved').textContent = (s.resolved_trades || 0) + ' resolved · ' + (s.pending || 0) + ' pending';
-  document.getElementById('s-wr').textContent = s.win_rate != null ? fmtPct(s.win_rate) : '—';
-  document.getElementById('s-wl').textContent = (s.wins || 0) + ' W / ' + (s.losses || 0) + ' L';
+  document.getElementById('s-resolved').textContent = (stats.resolved || 0) + ' resolved · ' + (stats.pending || 0) + ' pending';
+  document.getElementById('s-wr').textContent = stats.winRate != null ? fmtPct(stats.winRate) : '—';
+  document.getElementById('s-wl').textContent = (stats.wins || 0) + ' W / ' + (stats.losses || 0) + ' L';
+}
 
-  const bl = document.getElementById('bots-list');
-  bl.innerHTML = d.bots.length ? d.bots.map(b => {
-    const st = !b.active ? 'inactive' : b.paused ? 'paused' : 'active';
-    return `<div class="bot-row">
-      <div class="bot-indicator ${st}"></div>
-      <div><div class="bot-name">${b.name}</div><div class="bot-addr">${b.target}</div></div>
-      <div class="bot-meta">
-        <div class="bot-meta-item"><span>${!b.active ? 'Inactive' : b.paused ? 'Paused' : 'Running'}</span>Status</div>
-        <div class="bot-meta-item"><span>${b.paper_mode ? 'Paper' : 'Live'}</span>Mode</div>
-        <div class="bot-meta-item"><span>${b.total_trades}</span>Trades</div>
-        <div class="bot-meta-item"><span>${b.last_activity}</span>Last Active</div>
-      </div>
-    </div>`;
-  }).join('') : '<div style="text-align:center;padding:30px;color:var(--muted)">No bots registered.</div>';
+function selectBot(name) {
+  selectedBot = (selectedBot === name) ? null : name;
+  updateView();
+}
 
-  allTrades = d.paper_trades;
-  resetAndRender();
+function updateView() {
+  if (!allData) return;
+  const d = allData;
 
+  // Filter trades by selected bot
+  const botTrades = selectedBot ? d.paper_trades.filter(t => t.bot === selectedBot) : d.paper_trades;
+  const stats = calcStats(botTrades);
+  const totalDetected = selectedBot ? null : d.stats.total_detected;
+  const totalSkipped  = selectedBot ? null : d.stats.total_skipped;
+
+  // Update header label
+  document.getElementById('bots-sub').textContent = selectedBot ? `Viewing: ${selectedBot} — click again to deselect` : d.bots.length + ' bot(s) · click to filter';
+
+  renderKPIs(stats, totalDetected, totalSkipped);
+  renderBots(d.bots, d.paper_trades);
+
+  // Daily table — filter by bot if selected
+  const dailyRows = selectedBot ? d.daily_pnl.filter(r => r.bot === selectedBot) : d.daily_pnl;
   const db = document.getElementById('daily-tbody');
-  db.innerHTML = d.daily_pnl.length
-    ? d.daily_pnl.map(r => `<tr>
+  db.innerHTML = dailyRows.length
+    ? dailyRows.map(r => `<tr>
         <td>${r.date}</td><td>${r.bot}</td><td>${r.trades}</td>
         <td>${fmt(r.volume)}</td>
         <td class="${pnlCls(r.pnl)}">${r.pnl >= 0 ? '+' : ''}${fmt(r.pnl)}</td>
       </tr>`).join('')
     : '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:16px">No data yet.</td></tr>';
+
+  allTrades = botTrades;
+  resetAndRender();
+}
+
+function renderBots(bots, allPaperTrades) {
+  const bl = document.getElementById('bots-list');
+  if (!bots.length) {
+    bl.innerHTML = '<div style="text-align:center;padding:30px;color:var(--muted)">No bots registered.</div>';
+    return;
+  }
+
+  // Per-bot stats for summary column
+  const botStats = {};
+  bots.forEach(b => {
+    const bt = allPaperTrades.filter(t => t.bot === b.name);
+    botStats[b.name] = calcStats(bt);
+  });
+
+  const rows = bots.map(b => {
+    const st = !b.active ? 'inactive' : b.paused ? 'paused' : 'active';
+    const bs = botStats[b.name];
+    const selectedClass = selectedBot === b.name ? ' selected' : '';
+    const pnlStr = bs.resolved > 0
+      ? `<span style="color:${bs.pnl >= 0 ? 'var(--green)' : 'var(--red)'}; font-weight:600">${bs.pnl >= 0 ? '+' : ''}${fmt(bs.pnl)}</span>`
+      : '<span style="color:var(--muted)">—</span>';
+    return `<div class="bot-row${selectedClass}" onclick="selectBot('${b.name}')">
+      <div class="bot-indicator ${st}"></div>
+      <div><div class="bot-name">${b.name}</div><div class="bot-addr">${b.target}</div></div>
+      <div class="bot-meta">
+        <div class="bot-meta-item"><span>${!b.active ? 'Inactive' : b.paused ? 'Paused' : 'Running'}</span>Status</div>
+        <div class="bot-meta-item"><span>${b.paper_mode ? 'Paper' : 'Live'}</span>Mode</div>
+        <div class="bot-meta-item"><span>${bs.paper}</span>Trades</div>
+        <div class="bot-meta-item"><span>${fmt(bs.volume)}</span>Volume</div>
+        <div class="bot-meta-item"><span>${pnlStr}</span>P&amp;L</div>
+        <div class="bot-meta-item"><span>${b.last_activity}</span>Last Active</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Summary row across all bots
+  const allStats = calcStats(allPaperTrades || []);
+  const sumPnlStr = allStats.resolved > 0
+    ? `<span style="color:${allStats.pnl >= 0 ? 'var(--green)' : 'var(--red)'};font-weight:700">${allStats.pnl >= 0 ? '+' : ''}${fmt(allStats.pnl)}</span>`
+    : '<span style="color:var(--muted)">—</span>';
+  const summaryRow = `<div class="summary-row">
+    <div style="width:8px;height:8px;flex-shrink:0"></div>
+    <div><div class="bot-name">Portfolio Total</div><div class="bot-addr">${bots.length} bot(s) combined</div></div>
+    <div class="bot-meta">
+      <div class="bot-meta-item"><span style="color:var(--text)">—</span>Status</div>
+      <div class="bot-meta-item"><span style="color:var(--text)">—</span>Mode</div>
+      <div class="bot-meta-item"><span style="color:var(--text);font-weight:700">${allStats.paper}</span>Trades</div>
+      <div class="bot-meta-item"><span style="color:var(--text);font-weight:700">${fmt(allStats.volume)}</span>Volume</div>
+      <div class="bot-meta-item"><span>${sumPnlStr}</span>P&amp;L</div>
+      <div class="bot-meta-item"><span style="color:var(--text)">${allStats.winRate != null ? fmtPct(allStats.winRate) : '—'}</span>Win Rate</div>
+    </div>
+  </div>`;
+
+  bl.innerHTML = rows + summaryRow;
+}
+
+async function loadData() {
+  const days = document.getElementById('days-select').value;
+  allData = await fetch('/api/data?days=' + days).then(r => r.json());
+
+  document.getElementById('mode-badge').innerHTML = `<div class="dot"></div> ${allData.trading_mode.toUpperCase()}`;
+  document.getElementById('refresh-tag').textContent = 'Updated ' + allData.generated;
+  document.getElementById('s-window').textContent = 'last ' + allData.days + 'd';
+
+  updateView();
 }
 
 function resetAndRender() {
@@ -557,7 +646,6 @@ function renderPage() {
       </tr>`).join('')
     : `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">No trades match filters.</td></tr>`;
 
-  // Pagination controls
   document.getElementById('page-info').textContent =
     filteredTrades.length
       ? `Page ${currentPage} of ${totalPages} · ${filteredTrades.length} trades`
