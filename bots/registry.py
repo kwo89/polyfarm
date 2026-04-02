@@ -25,38 +25,51 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+POLL_FOR_NEW_BOTS_INTERVAL = 30  # seconds between checks for newly registered bots
+
 
 def run_all_bots(bot_id: Optional[str] = None):
-    """Launch all active bots (or a specific one) as daemon threads."""
-    with get_session() as session:
-        q = select(BotRegistry).where(BotRegistry.active == True)
-        if bot_id:
-            q = q.where(BotRegistry.id == bot_id)
-        bots = session.execute(q).scalars().all()
-        bot_configs = [(b.id, b.name) for b in bots]
+    """
+    Launch all active bots as daemon threads.
+    Keeps running forever — polls for newly added bots every 30s.
+    Never exits on its own (Docker restart: unless-stopped handles crashes).
+    """
+    running: dict[str, threading.Thread] = {}  # bot_id -> thread
 
-    if not bot_configs:
-        logger.warning("No active bots found. Use scripts/add_bot.py to register one.")
-        return
+    logger.info("PolyFarm bot runner started. Waiting for bots...")
 
-    threads = []
-    for bid, name in bot_configs:
-        logger.info("Starting bot: %s (%s)", name, bid)
-        bot = CopyBot(bid)
-        t = threading.Thread(target=bot.run, name=f"bot-{name}", daemon=True)
-        t.start()
-        threads.append(t)
+    while True:
+        try:
+            with get_session() as session:
+                q = select(BotRegistry).where(BotRegistry.active == True).where(BotRegistry.paused == False)
+                if bot_id:
+                    q = q.where(BotRegistry.id == bot_id)
+                bots = session.execute(q).scalars().all()
+                bot_configs = [(b.id, b.name) for b in bots]
 
-    logger.info("Running %d bot(s). Press Ctrl+C to stop.", len(threads))
-    try:
-        while True:
-            alive = [t for t in threads if t.is_alive()]
-            if not alive:
-                logger.warning("All bot threads have exited.")
-                break
-            time.sleep(10)
-    except KeyboardInterrupt:
-        logger.info("Shutting down.")
+            if not bot_configs:
+                logger.info("No active bots registered yet. Checking again in %ds...", POLL_FOR_NEW_BOTS_INTERVAL)
+            else:
+                # Start any bot that isn't already running
+                for bid, name in bot_configs:
+                    if bid not in running or not running[bid].is_alive():
+                        if bid in running:
+                            logger.warning("Bot %s thread died — restarting.", name)
+                        else:
+                            logger.info("Starting bot: %s (%s)", name, bid)
+                        bot = CopyBot(bid)
+                        t = threading.Thread(target=bot.run, name=f"bot-{name}", daemon=True)
+                        t.start()
+                        running[bid] = t
+
+                alive = [bid for bid, t in running.items() if t.is_alive()]
+                logger.info("%d bot(s) running: %s", len(alive),
+                            ", ".join(n for bid, n in bot_configs if bid in alive))
+
+        except Exception as e:
+            logger.exception("Registry loop error: %s", e)
+
+        time.sleep(POLL_FOR_NEW_BOTS_INTERVAL)
 
 
 if __name__ == "__main__":
