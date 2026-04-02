@@ -64,56 +64,72 @@ def _calc_pnl(trade: PaperTrade, winning_outcome: str) -> float:
 
 def _parse_resolution(market_data: dict) -> Optional[str]:
     """
-    Extract the winning outcome from Polymarket's Gamma API response.
+    Extract the winning outcome from Polymarket API data.
     Returns "YES", "NO", or None if not yet resolved.
 
-    This is the ONLY place Won/Lost is determined — directly from Polymarket data.
-    We never infer it from price movements or P&L calculations.
+    Source of truth: Polymarket CLOB API (clob.polymarket.com/markets/{id})
+    CLOB response has tokens[] with outcome + price fields.
+    A price of exactly 1.0 means that outcome won.
+    A price of exactly 0.0 means that outcome lost.
 
-    Polymarket Gamma API fields checked (in order of reliability):
-      1. tokens[].winner  — most reliable, set at on-chain resolution
-      2. winnerOutcome    — string field on the market object
-      3. closed + tokens[].price reaching 1.0 — last resort
+    Also handles Gamma API format as fallback (winnerOutcome / tokens[].winner).
     """
     if not market_data:
         return None
 
-    # Market must be closed/resolved on Polymarket's end
+    # Market must be closed on Polymarket's end
     if not market_data.get("closed") and not market_data.get("resolved"):
         return None
 
-    # 1. tokens array — winner flag set by Polymarket at resolution
     tokens = market_data.get("tokens", [])
+
+    # 1. CLOB API format: token price == 1.0 means that outcome won
+    #    This is the primary signal for BTC 5-min and all CLOB markets
+    for token in tokens:
+        try:
+            price = float(token.get("price", -1))
+            if price == 1.0:
+                raw = str(token.get("outcome", "")).strip().upper()
+                if raw in ("YES", "NO"):
+                    return raw
+                if raw in ("TRUE", "UP", "1"):
+                    return "YES"
+                if raw in ("FALSE", "DOWN", "0"):
+                    return "NO"
+        except (TypeError, ValueError):
+            pass
+
+    # 2. Gamma API format: explicit winner flag on token
     for token in tokens:
         if token.get("winner") is True:
             raw = str(token.get("outcome", "")).strip().upper()
             if raw in ("YES", "NO"):
                 return raw
-            # Handle non-standard outcome labels
-            if raw in ("TRUE", "1"):
-                return "YES"
-            if raw in ("FALSE", "0"):
-                return "NO"
 
-    # 2. winnerOutcome field
+    # 3. Gamma API format: winnerOutcome string field
     winner = str(market_data.get("winnerOutcome") or "").strip().upper()
     if winner in ("YES", "NO"):
         return winner
 
-    # 3. Last resort: a token with price == 1.0 is the winner
-    for token in tokens:
+    # 4. outcomePrices array (Gamma format): ["1", "0"] → YES won, ["0", "1"] → NO won
+    outcome_prices_raw = market_data.get("outcomePrices")
+    outcomes_raw = market_data.get("outcomes")
+    if outcome_prices_raw and outcomes_raw:
         try:
-            if float(token.get("price", 0)) == 1.0:
-                raw = str(token.get("outcome", "")).strip().upper()
-                if raw in ("YES", "NO"):
-                    logger.debug("Resolution via price=1.0 for token %s", raw)
-                    return raw
-        except (TypeError, ValueError):
+            import json as _json
+            prices = _json.loads(outcome_prices_raw) if isinstance(outcome_prices_raw, str) else outcome_prices_raw
+            outcomes = _json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else outcomes_raw
+            for i, price in enumerate(prices):
+                if float(price) == 1.0 and i < len(outcomes):
+                    raw = str(outcomes[i]).strip().upper()
+                    if raw in ("YES", "NO"):
+                        return raw
+        except (ValueError, TypeError, KeyError):
             pass
 
-    # Market is closed but we can't determine winner yet — leave as pending
-    logger.debug("Market closed but winner not determinable yet: %s",
-                 str(market_data.get("conditionId", ""))[:12])
+    # Market is closed but winner not yet determinable
+    logger.debug("Market closed but winner not determinable: %s",
+                 str(market_data.get("condition_id") or market_data.get("conditionId", ""))[:16])
     return None
 
 

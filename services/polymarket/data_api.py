@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 DATA_API = "https://data-api.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
+CLOB_API  = "https://clob.polymarket.com"
 
 # Shared session with retry + connection pooling
 _session = requests.Session()
@@ -101,14 +102,39 @@ def get_wallet_positions(address: str, limit: int = 500) -> list[dict]:
     return data.get("data", [])
 
 
-# ─── MARKETS (via Gamma API) ──────────────────────────────────────────────────
+# ─── MARKETS ─────────────────────────────────────────────────────────────────
+
+def get_market_clob(condition_id: str) -> dict:
+    """
+    Fetch market data from the CLOB API by conditionId (most reliable).
+    Returns token prices — a price of 1.0 means that token/outcome won.
+    Works correctly for BTC 5-min markets and all other market types.
+
+    Response includes:
+      condition_id, question, closed, tokens (list of {token_id, outcome, price})
+    """
+    data = _get(CLOB_API, f"/markets/{condition_id}")
+    if isinstance(data, list):
+        return data[0] if data else {}
+    return data or {}
+
 
 def get_market(condition_id: str) -> dict:
-    """Fetch metadata for a market by conditionId."""
+    """
+    Fetch market metadata. Tries CLOB API first (reliable for all markets),
+    falls back to Gamma API for additional metadata if needed.
+    """
+    try:
+        clob_data = get_market_clob(condition_id)
+        if clob_data:
+            return clob_data
+    except Exception as e:
+        logger.debug("CLOB API failed for %s: %s — trying Gamma", condition_id[:12], e)
+    # Fallback to Gamma (may not work for all market types)
     data = _get(GAMMA_API, "/markets", params={"conditionId": condition_id})
     if isinstance(data, list):
         return data[0] if data else {}
-    return data
+    return data or {}
 
 
 def get_markets(limit: int = 100, offset: int = 0, active: bool = True) -> list[dict]:
