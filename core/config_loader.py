@@ -93,6 +93,7 @@ def sync_bots_from_config():
             active = bot_cfg.get("active", True)
             paper_mode = bot_cfg.get("paper_mode", True)
             poll_interval = bot_cfg.get("poll_interval_sec", 30)
+            our_capital = float(bot_cfg.get("our_capital", 100.0))
 
             existing = by_wallet.get(wallet.lower())
 
@@ -112,7 +113,10 @@ def sync_bots_from_config():
                     changed.append(f"poll={poll_interval}s")
                 if existing.target_daily_capital != capital:
                     existing.target_daily_capital = capital
-                    changed.append(f"capital={capital}")
+                    changed.append(f"target_capital={capital}")
+                if existing.our_capital != our_capital:
+                    existing.our_capital = our_capital
+                    changed.append(f"our_capital={our_capital}")
                 if changed:
                     logger.info("Updated bot '%s': %s", name, ", ".join(changed))
                 else:
@@ -125,10 +129,12 @@ def sync_bots_from_config():
                     paper_mode=paper_mode,
                     poll_interval_sec=poll_interval,
                     target_daily_capital=capital,
+                    our_capital=our_capital,
                     total_trades=0,
                 )
                 session.add(new_bot)
-                logger.info("Registered new bot: '%s' (wallet …%s)", name, wallet[-6:])
+                logger.info("Registered new bot: '%s' (wallet …%s, our_capital=$%.0f)",
+                            name, wallet[-6:], our_capital)
 
     logger.info("Bot sync complete.")
 

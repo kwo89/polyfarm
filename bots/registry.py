@@ -19,6 +19,7 @@ from core.models import BotRegistry
 from core.config_loader import sync_bots_from_config
 from bots.base_bot import CopyBot
 from bots.resolver import run_resolver_loop
+from bots.calibrator import run_calibrator_loop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -82,11 +83,18 @@ if __name__ == "__main__":
     init_db()
     sync_bots_from_config()   # sync config.yml → DB before starting bots
 
-    # Start resolution checker as a background thread (runs every 15 min)
+    # Start resolution checker (every 15 min)
     resolver_thread = threading.Thread(
         target=run_resolver_loop, name="resolver", daemon=True
     )
     resolver_thread.start()
     logger.info("Resolution checker thread started.")
+
+    # Start weekly calibrator (runs at startup + every 7 days)
+    calibrator_thread = threading.Thread(
+        target=run_calibrator_loop, name="calibrator", daemon=True
+    )
+    calibrator_thread.start()
+    logger.info("Weekly calibrator thread started.")
 
     run_all_bots(bot_id=args.bot_id)

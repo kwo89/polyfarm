@@ -43,6 +43,7 @@ class CopyBot:
             self.target_address = bot.target_address
             self.poll_interval = bot.poll_interval_sec
             self.paper_mode = bot.paper_mode
+            self.our_capital = bot.our_capital or settings.initial_portfolio_usd
             self.target_daily_capital = bot.target_daily_capital or 2000.0
 
     # ── Main loop ─────────────────────────────────────────────────────────────
@@ -281,8 +282,8 @@ class CopyBot:
                 trade.skip_reason = skip_reason
 
     def _get_portfolio_balance(self) -> float:
-        """Return current portfolio balance. Uses initial value until positions tracked."""
-        return settings.initial_portfolio_usd
+        """Return this bot's capital allocation (per-bot, not global)."""
+        return self.our_capital
 
     def _estimate_target_capital(self) -> float:
         """Target's estimated deployed capital — set per-bot in registry."""

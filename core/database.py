@@ -34,8 +34,27 @@ SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 
 def init_db():
-    """Create all tables if they don't exist."""
+    """Create all tables and apply any pending column migrations."""
     Base.metadata.create_all(engine)
+    _migrate()
+
+
+def _migrate():
+    """
+    Safe ALTER TABLE migrations for new columns added to existing tables.
+    SQLite doesn't support IF NOT EXISTS on ALTER TABLE so we catch the error.
+    Add a new entry here whenever a column is added to an existing model.
+    """
+    migrations = [
+        "ALTER TABLE bot_registry ADD COLUMN our_capital REAL DEFAULT 100.0",
+    ]
+    with engine.connect() as conn:
+        for sql in migrations:
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+            except Exception:
+                pass  # Column already exists — safe to ignore
 
 
 @contextmanager

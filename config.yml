@@ -11,16 +11,18 @@
 
 bots:
   - name: Bot1
+    our_capital: 100          # our starting capital allocated to this bot (USD)
     poll_interval_sec: 30
     paper_mode: true
     active: true
-    notes: "BTC Up/Down 5-min markets. Scaling ~3.8%."
+    notes: "BTC Up/Down 5-min markets."
 
-  # - name: Bot2
-  #   poll_interval_sec: 30
-  #   paper_mode: true
-  #   active: false
-  #   notes: "Disabled — pending review"
+  - name: Bot2
+    our_capital: 1000         # our starting capital allocated to this bot (USD)
+    poll_interval_sec: 30
+    paper_mode: true
+    active: true
+    notes: "New wallet — ratio calibrated weekly from observed volume."
 
 # ── Portfolio ─────────────────────────────────────────────────────────────────
 portfolio:
