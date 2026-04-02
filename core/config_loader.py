@@ -63,6 +63,7 @@ def get_bot_capital(bot_name: str) -> float:
 def sync_bots_from_config():
     """
     Sync bots defined in config.yml into the database.
+    - Matches existing bots by wallet address (so renaming works correctly)
     - Creates new bots that don't exist yet
     - Updates name, settings, active/paused state for existing bots
     - Never deletes bots (preserves trade history)
@@ -76,7 +77,9 @@ def sync_bots_from_config():
         return
 
     with get_session() as session:
-        existing = {b.name: b for b in session.execute(select(BotRegistry)).scalars().all()}
+        all_bots = session.execute(select(BotRegistry)).scalars().all()
+        # Match by wallet address — renaming in config.yml just updates the name
+        by_wallet = {b.target_address.lower(): b for b in all_bots}
 
         for bot_cfg in bot_cfgs:
             name = bot_cfg["name"]
@@ -91,28 +94,29 @@ def sync_bots_from_config():
             paper_mode = bot_cfg.get("paper_mode", True)
             poll_interval = bot_cfg.get("poll_interval_sec", 30)
 
-            if name in existing:
-                bot = existing[name]
+            existing = by_wallet.get(wallet.lower())
+
+            if existing:
                 changed = []
-                if bot.target_address != wallet:
-                    bot.target_address = wallet
-                    changed.append("wallet")
-                if bot.active != active:
-                    bot.active = active
+                if existing.name != name:
+                    changed.append(f"name: {existing.name!r} → {name!r}")
+                    existing.name = name
+                if existing.active != active:
+                    existing.active = active
                     changed.append(f"active={active}")
-                if bot.paper_mode != paper_mode:
-                    bot.paper_mode = paper_mode
+                if existing.paper_mode != paper_mode:
+                    existing.paper_mode = paper_mode
                     changed.append(f"paper_mode={paper_mode}")
-                if bot.poll_interval_sec != poll_interval:
-                    bot.poll_interval_sec = poll_interval
+                if existing.poll_interval_sec != poll_interval:
+                    existing.poll_interval_sec = poll_interval
                     changed.append(f"poll={poll_interval}s")
-                if bot.target_daily_capital != capital:
-                    bot.target_daily_capital = capital
+                if existing.target_daily_capital != capital:
+                    existing.target_daily_capital = capital
                     changed.append(f"capital={capital}")
                 if changed:
                     logger.info("Updated bot '%s': %s", name, ", ".join(changed))
                 else:
-                    logger.info("Bot '%s' unchanged", name)
+                    logger.info("Bot '%s' up to date", name)
             else:
                 new_bot = BotRegistry(
                     name=name,
