@@ -56,6 +56,35 @@ def _require_auth(handler):
 
 # ── Dashboard data ────────────────────────────────────────────────────────────
 
+def get_skipped_trades(days: int = 7) -> dict:
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    with get_session() as session:
+        bots_raw = session.execute(select(BotRegistry)).scalars().all()
+        bot_names = {b.id: b.name for b in bots_raw}
+        rows = session.execute(
+            select(TargetTrade)
+            .where(TargetTrade.status == "skipped")
+            .where(TargetTrade.detected_at >= since)
+            .order_by(desc(TargetTrade.detected_at))
+            .limit(500)
+        ).scalars().all()
+        trades = [
+            {
+                "time": r.detected_at.strftime("%Y-%m-%d %H:%M") if r.detected_at else "—",
+                "bot": bot_names.get(r.bot_id, r.bot_id[:8] if r.bot_id else "?"),
+                "side": r.side,
+                "outcome": r.outcome,
+                "target_size": round(r.target_size or 0, 2),
+                "scaled_size": round(r.scaled_size or 0, 2),
+                "price": round(r.target_price or 0, 3),
+                "reason": r.skip_reason or "unknown",
+                "market": (r.question or r.market_id or "")[:70],
+            }
+            for r in rows
+        ]
+    return {"skipped": trades, "total": len(trades), "days": days}
+
+
 def _trade_status(t) -> str:
     """Derive won/lost/pending from resolution data."""
     if not t.market_resolved:
@@ -178,6 +207,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             qs = parse_qs(parsed.query)
             days = int(qs.get("days", ["7"])[0])
             self._json(get_dashboard_data(days=days))
+
+        elif parsed.path == "/api/skipped":
+            qs = parse_qs(parsed.query)
+            days = int(qs.get("days", ["7"])[0])
+            self._json(get_skipped_trades(days=days))
 
         elif parsed.path == "/api/memory":
             try:
@@ -310,10 +344,43 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div class="stats-grid">
     <div class="stat-card"><div class="label">Paper Trades</div><div class="value blue" id="s-paper">—</div><div class="sub" id="s-window">last 7d</div></div>
-    <div class="stat-card"><div class="label">Skipped</div><div class="value" id="s-skipped">—</div><div class="sub" id="s-detected">of — detected</div></div>
+    <div class="stat-card" id="skipped-card" style="cursor:pointer" onclick="openSkipped()" title="Click to see skipped trade log">
+      <div class="label">Skipped ↗</div><div class="value" id="s-skipped">—</div><div class="sub" id="s-detected">of — detected</div>
+    </div>
     <div class="stat-card"><div class="label">Hyp. Volume</div><div class="value" id="s-vol">—</div><div class="sub">USD</div></div>
-    <div class="stat-card"><div class="label">Resolved P&L</div><div class="value" id="s-pnl">—</div><div class="sub" id="s-resolved">— resolved</div></div>
+    <div class="stat-card">
+      <div class="label">Resolved P&L</div>
+      <div class="value" id="s-pnl">—</div>
+      <div class="sub" id="s-resolved">— resolved</div>
+      <div class="sub" id="s-pnl-pct" style="margin-top:2px;font-size:12px"></div>
+    </div>
     <div class="stat-card"><div class="label">Win Rate</div><div class="value" id="s-wr">—</div><div class="sub" id="s-wl">— W / — L</div></div>
+  </div>
+
+  <!-- Skipped trades modal -->
+  <div id="skipped-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;overflow-y:auto">
+    <div style="max-width:900px;margin:40px auto;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:0 0 20px">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid var(--border)">
+        <div style="font-weight:700;font-size:15px">Skipped Trades Log</div>
+        <button onclick="closeSkipped()" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:0 4px">✕</button>
+      </div>
+      <div style="padding:12px 20px 0;font-size:12px;color:var(--muted)" id="skipped-summary"></div>
+      <div style="overflow-x:auto;padding:0 8px">
+        <table style="width:100%;border-collapse:collapse;min-width:600px;margin-top:8px">
+          <thead><tr>
+            <th style="font-size:11px;text-transform:uppercase;color:var(--muted);padding:8px 12px;text-align:left;background:var(--surface2);border-bottom:1px solid var(--border)">Time</th>
+            <th style="font-size:11px;text-transform:uppercase;color:var(--muted);padding:8px 12px;text-align:left;background:var(--surface2);border-bottom:1px solid var(--border)">Bot</th>
+            <th style="font-size:11px;text-transform:uppercase;color:var(--muted);padding:8px 12px;text-align:left;background:var(--surface2);border-bottom:1px solid var(--border)">Side</th>
+            <th style="font-size:11px;text-transform:uppercase;color:var(--muted);padding:8px 12px;text-align:left;background:var(--surface2);border-bottom:1px solid var(--border)">Out</th>
+            <th style="font-size:11px;text-transform:uppercase;color:var(--muted);padding:8px 12px;text-align:left;background:var(--surface2);border-bottom:1px solid var(--border)">Target $</th>
+            <th style="font-size:11px;text-transform:uppercase;color:var(--muted);padding:8px 12px;text-align:left;background:var(--surface2);border-bottom:1px solid var(--border)">Scaled $</th>
+            <th style="font-size:11px;text-transform:uppercase;color:var(--muted);padding:8px 12px;text-align:left;background:var(--surface2);border-bottom:1px solid var(--border)">Skip Reason</th>
+            <th style="font-size:11px;text-transform:uppercase;color:var(--muted);padding:8px 12px;text-align:left;background:var(--surface2);border-bottom:1px solid var(--border)">Market</th>
+          </tr></thead>
+          <tbody id="skipped-tbody"><tr><td colspan="8" style="text-align:center;padding:30px;color:var(--muted)">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
   </div>
   <div class="section">
     <div class="section-header"><div class="section-title">Bots</div><div id="bots-sub" style="font-size:11px;color:var(--muted)"></div></div>
@@ -399,8 +466,21 @@ async function loadData() {
   document.getElementById('s-vol').textContent = fmt(s.total_volume);
 
   const pe = document.getElementById('s-pnl');
-  pe.textContent = s.resolved_trades > 0 ? (s.total_pnl >= 0 ? '+' : '') + fmt(s.total_pnl) : '—';
-  pe.className = 'value ' + (s.total_pnl >= 0 ? 'green' : 'red');
+  if (s.resolved_trades > 0) {
+    const sign = s.total_pnl >= 0 ? '+' : '';
+    pe.textContent = sign + fmt(s.total_pnl);
+    pe.className = 'value ' + (s.total_pnl >= 0 ? 'green' : 'red');
+    // P&L % return = total_pnl / total_volume * 100
+    const pct = s.total_volume > 0 ? (s.total_pnl / s.total_volume * 100) : null;
+    const pctEl = document.getElementById('s-pnl-pct');
+    if (pct !== null) {
+      pctEl.textContent = (pct >= 0 ? '+' : '') + pct.toFixed(1) + '% return on volume';
+      pctEl.style.color = pct >= 0 ? 'var(--green)' : 'var(--red)';
+    }
+  } else {
+    pe.textContent = '—';
+    pe.className = 'value';
+  }
   document.getElementById('s-resolved').textContent = (s.resolved_trades || 0) + ' resolved · ' + (s.pending || 0) + ' pending';
   document.getElementById('s-wr').textContent = s.win_rate != null ? fmtPct(s.win_rate) : '—';
   document.getElementById('s-wl').textContent = (s.wins || 0) + ' W / ' + (s.losses || 0) + ' L';
@@ -489,6 +569,48 @@ function renderPage() {
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
+
+// ── Skipped trades modal ──────────────────────────────────────────────────────
+async function openSkipped() {
+  document.getElementById('skipped-modal').style.display = 'block';
+  document.body.style.overflow = 'hidden';
+  const days = document.getElementById('days-select').value;
+  const data = await fetch('/api/skipped?days=' + days).then(r => r.json());
+  const trades = data.skipped || [];
+
+  document.getElementById('skipped-summary').textContent =
+    trades.length + ' skipped trades in last ' + days + 'd — click a row to copy market ID';
+
+  // Count by reason
+  const reasons = {};
+  trades.forEach(t => { reasons[t.reason] = (reasons[t.reason] || 0) + 1; });
+
+  const tb = document.getElementById('skipped-tbody');
+  if (!trades.length) {
+    tb.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:30px;color:var(--muted)">No skipped trades in this window.</td></tr>';
+    return;
+  }
+  tb.innerHTML = trades.map(t => `<tr style="cursor:default">
+    <td style="white-space:nowrap;color:var(--muted);padding:8px 12px;font-size:12px;border-bottom:1px solid var(--border)">${t.time}</td>
+    <td style="padding:8px 12px;font-size:12px;border-bottom:1px solid var(--border);font-weight:500">${esc(t.bot)}</td>
+    <td style="padding:8px 12px;font-size:12px;border-bottom:1px solid var(--border)"><span class="pill ${t.side.toLowerCase()}">${t.side}</span></td>
+    <td style="padding:8px 12px;font-size:12px;border-bottom:1px solid var(--border)"><span class="pill ${(t.outcome||'').toLowerCase()}">${t.outcome}</span></td>
+    <td style="padding:8px 12px;font-size:12px;border-bottom:1px solid var(--border);font-weight:600">$${t.target_size.toFixed(2)}</td>
+    <td style="padding:8px 12px;font-size:12px;border-bottom:1px solid var(--border);color:var(--muted)">$${t.scaled_size.toFixed(2)}</td>
+    <td style="padding:8px 12px;font-size:12px;border-bottom:1px solid var(--border);color:var(--yellow)">${esc(t.reason)}</td>
+    <td style="padding:8px 12px;font-size:12px;border-bottom:1px solid var(--border);color:var(--muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(t.market)}">${esc(t.market)}</td>
+  </tr>`).join('');
+}
+
+function closeSkipped() {
+  document.getElementById('skipped-modal').style.display = 'none';
+  document.body.style.overflow = '';
+}
+
+// Close modal on backdrop click
+document.getElementById('skipped-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeSkipped();
+});
 
 loadData();
 setInterval(loadData, 30000);
