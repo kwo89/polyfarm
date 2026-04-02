@@ -14,6 +14,7 @@ import base64
 import json
 import os
 import sys
+import uuid
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -158,6 +159,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             days = int(qs.get("days", ["7"])[0])
             self._json(get_dashboard_data(days=days))
 
+        elif parsed.path == "/api/memory":
+            try:
+                from agents.ceo.memory import read_memory
+                mem = read_memory()
+                self._json({"memory": mem, "path": "data/ceo_memory.md"})
+            except Exception as e:
+                self._json({"memory": "", "error": str(e)})
+
         elif parsed.path in ("/", "/index.html"):
             self._html(DASHBOARD_HTML)
 
@@ -179,17 +188,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
             messages = body.get("messages", [])
+            session_id = body.get("session_id") or str(uuid.uuid4())
 
             if not ANTHROPIC_API_KEY:
-                self._json({"reply": "⚠️ ANTHROPIC_API_KEY is not set in .env on the server. Add it and restart the dashboard container."})
+                self._json({"reply": "⚠️ ANTHROPIC_API_KEY is not set in .env on the server. Add it and restart the dashboard container.", "session_id": session_id})
                 return
 
             try:
                 from agents.ceo.agent import chat
-                reply = chat(messages, ANTHROPIC_API_KEY)
-                self._json({"reply": reply})
+                reply, session_id = chat(messages, ANTHROPIC_API_KEY, session_id)
+                self._json({"reply": reply, "session_id": session_id})
             except Exception as e:
-                self._json({"reply": f"Error: {e}"})
+                self._json({"reply": f"Error: {e}", "session_id": session_id})
         else:
             self.send_response(404)
             self.end_headers()
@@ -437,6 +447,8 @@ Try one of the suggestions below, or just type.</div>
 
 <script>
 const history = [];
+// Persist session across page refreshes within the same tab
+let sessionId = sessionStorage.getItem('ceo_session_id') || null;
 
 function handleKey(e) {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendInput(); }
@@ -471,10 +483,16 @@ async function send(text) {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: history }),
+      body: JSON.stringify({ messages: history, session_id: sessionId }),
     });
     const data = await res.json();
     const reply = data.reply || '(no response)';
+
+    // Persist session_id returned by server
+    if (data.session_id) {
+      sessionId = data.session_id;
+      sessionStorage.setItem('ceo_session_id', sessionId);
+    }
 
     document.getElementById(typingId)?.remove();
     msgs.innerHTML += `<div class="msg ceo"><div class="avatar ceo">C</div><div class="bubble">${esc(reply)}</div></div>`;
