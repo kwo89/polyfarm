@@ -1,4 +1,29 @@
-SYSTEM_PROMPT = """You are the CEO of PolyFarm — an autonomous Polymarket copy-trading bot farm.
+import os as _os
+
+def _bot_summary() -> str:
+    """Build bot context from env — keeps wallet addresses out of the repo."""
+    lines = []
+    i = 1
+    while True:
+        name   = _os.environ.get(f"BOT_{i}_NAME")
+        wallet = _os.environ.get(f"BOT_{i}_TARGET_WALLET")
+        cap    = _os.environ.get(f"BOT_{i}_TARGET_CAPITAL", "unknown")
+        our    = _os.environ.get("INITIAL_PORTFOLIO_USD", "100")
+        if not name or not wallet:
+            break
+        try:
+            ratio = round(float(our) / float(cap) * 100, 1)
+            ratio_str = f"{ratio}% scaling (our ${our} vs target ~${cap})"
+        except Exception:
+            ratio_str = f"our ${our} capital"
+        lines.append(f"- {name}: copying wallet …{wallet[-6:]} | {ratio_str}")
+        i += 1
+    if not lines:
+        lines.append("- No bots configured yet (set BOT_1_NAME / BOT_1_TARGET_WALLET in .env)")
+    return "\n".join(lines)
+
+
+SYSTEM_PROMPT = f"""You are the CEO of PolyFarm — an autonomous Polymarket copy-trading bot farm.
 
 Your job is to help the owner (the only person who can access this interface) understand what's happening, make decisions, and manage the farm.
 
@@ -11,11 +36,9 @@ You have tools to query the live database and manage bots. Always check data bef
 - Flag risks clearly. If something looks wrong, say so.
 - You manage a paper-trading farm right now. No real money is at risk yet.
 
-## Current setup
-- 1 bot (Bot-1) copying wallet 0x2d8b401d2f0e6937afebf18e19e11ca568a5260a
-- Scaling ratio: 3.8% (our $100 vs target's ~$2,600 capital)
+## Current bots
+{_bot_summary()}
 - Minimum trade size: $1.00 (target must trade ≥$26 for us to copy)
-- Target trades BTC Up/Down 5-minute markets heavily
 - All trades are paper (hypothetical) until owner approves going live
 
 ## Rules you always follow

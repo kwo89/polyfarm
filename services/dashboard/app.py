@@ -27,8 +27,8 @@ from core.database import init_db, get_session
 from core.models import BotRegistry, PaperTrade, TargetTrade, DailyPnl, SystemConfig
 
 PORT = int(os.environ.get("DASHBOARD_PORT", 8080))
-DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "admin")
-DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "polyfarm2026")
+DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "")
+DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 
@@ -518,6 +518,10 @@ function esc(s) {
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    if not DASHBOARD_USER or not DASHBOARD_PASSWORD:
+        print("ERROR: DASHBOARD_USER and DASHBOARD_PASSWORD must be set in .env")
+        print("       Dashboard will not start without credentials configured.")
+        sys.exit(1)
     init_db()
     server = HTTPServer(("0.0.0.0", PORT), DashboardHandler)
     print(f"PolyFarm Dashboard running at http://0.0.0.0:{PORT}")
