@@ -1,16 +1,18 @@
 """
 CEO persistent memory system.
 
-Stores CEO memory in two places:
-  - data/ceo_memory.md  — human-readable, injected into every session
-  - ceo_conversations   — full conversation log in SQLite (for history)
+Each conversation ends with the CEO rewriting its memory file from scratch —
+condensed, accurate, no stale assumptions. Every rewrite is auto-committed to
+Git so you get full version history for free. Revert anytime with git.
 
-After each conversation the CEO writes a structured update to ceo_memory.md.
-Every new session loads this file and injects it into the system prompt.
+Files:
+  data/ceo_memory.md        — current CEO memory (injected into every session)
+  ceo_conversations table   — full conversation log in SQLite
 """
 
 import json
 import os
+import subprocess
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -18,11 +20,12 @@ from pathlib import Path
 from sqlalchemy import Column, String, Text, DateTime, Integer, select, desc
 from sqlalchemy.orm import DeclarativeBase
 
-from core.database import engine, get_session, SessionLocal
+from core.database import engine, get_session
 from core.models import Base
 
 DB_PATH = os.environ.get("DB_PATH", "data/polyfarm.db")
 MEMORY_PATH = Path(DB_PATH).parent / "ceo_memory.md"
+REPO_ROOT = Path(__file__).parent.parent.parent  # PolyFarm/
 
 
 # ── Conversation log table ────────────────────────────────────────────────────
@@ -71,33 +74,6 @@ def load_session_history(session_id: str) -> list[dict]:
         return [{"role": r.role, "content": r.content} for r in rows]
 
 
-def load_recent_conversations(limit: int = 5) -> list[dict]:
-    """Load the last N sessions for context (summary format)."""
-    with get_session() as session:
-        rows = session.execute(
-            select(CeoConversation)
-            .order_by(desc(CeoConversation.created_at))
-            .limit(limit * 10)
-        ).scalars().all()
-        # Group by session
-        sessions: dict[str, list] = {}
-        for r in rows:
-            sessions.setdefault(r.session_id, []).append(r)
-        recent = []
-        for sid, msgs in list(sessions.items())[:limit]:
-            first = min(msgs, key=lambda m: m.turn_index)
-            recent.append({
-                "session_id": sid,
-                "started_at": first.created_at.strftime("%Y-%m-%d %H:%M UTC"),
-                "message_count": len(msgs),
-                "first_user_message": next(
-                    (m.content[:120] for m in sorted(msgs, key=lambda x: x.turn_index)
-                     if m.role == "user"), ""
-                ),
-            })
-        return recent
-
-
 # ── Memory file ───────────────────────────────────────────────────────────────
 
 def read_memory() -> str:
@@ -120,11 +96,44 @@ def get_memory_prompt() -> str:
         return ""
     return f"""
 ---
-## Your persistent memory (updated after each conversation)
+## Your persistent memory
+This is your current knowledge base. It was written by you at the end of the last session.
+Treat it as ground truth about the farm state, owner preferences, and open items.
 
 {mem}
 ---
 """
+
+
+# ── Git version control ───────────────────────────────────────────────────────
+
+def _git_commit_memory(commit_message: str):
+    """
+    Commit the memory file to git. Silently no-ops if git is unavailable
+    or nothing changed. This gives free version history — revert anytime with:
+        git log data/ceo_memory.md
+        git checkout <hash> -- data/ceo_memory.md
+    """
+    try:
+        # Configure git identity if not set (needed on fresh servers)
+        subprocess.run(
+            ["git", "config", "user.email", "ceo@polyfarm.local"],
+            cwd=REPO_ROOT, capture_output=True
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "PolyFarm CEO"],
+            cwd=REPO_ROOT, capture_output=True
+        )
+        subprocess.run(
+            ["git", "add", str(MEMORY_PATH)],
+            cwd=REPO_ROOT, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", commit_message],
+            cwd=REPO_ROOT, check=True, capture_output=True
+        )
+    except subprocess.CalledProcessError:
+        pass  # Nothing changed or git unavailable — not a hard failure
 
 
 # ── Memory update tool ────────────────────────────────────────────────────────
@@ -132,90 +141,61 @@ def get_memory_prompt() -> str:
 UPDATE_MEMORY_TOOL = {
     "name": "update_memory",
     "description": (
-        "Update your persistent memory after a conversation. "
-        "Call this at the END of every conversation to record key decisions, "
-        "observations, user preferences, and action items. "
-        "Your memory is injected at the start of every future session — "
-        "write only what's useful for future-you to know."
+        "Rewrite your persistent memory at the END of every conversation. "
+        "You receive your current memory (injected at the top of this session) "
+        "and the full conversation that just happened. "
+        "Produce a complete, concise rewrite of the memory file — include everything "
+        "that's still true and useful, remove anything outdated or superseded. "
+        "Do NOT just append. Rewrite the whole thing from scratch. "
+        "The previous version is preserved in Git — you can always revert."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "key_decisions": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Important decisions made in this conversation (dated)",
-            },
-            "observations": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Performance observations, anomalies, patterns noticed",
-            },
-            "user_preferences": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Things the user prefers, dislikes, or has strong opinions about",
-            },
-            "action_items": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Open tasks or follow-ups (include dates where relevant)",
-            },
-            "farm_state": {
+            "rewritten_memory": {
                 "type": "string",
-                "description": "One-paragraph summary of current farm state and context",
+                "description": (
+                    "Complete rewrite of ceo_memory.md in markdown. "
+                    "Sections to include (only if non-empty): "
+                    "## Farm State, ## Active Bots, ## Owner Preferences, "
+                    "## Open Action Items, ## Key Decisions, ## Observations. "
+                    "Be concise — every line should be useful to future-you. "
+                    "Remove anything no longer accurate."
+                ),
+            },
+            "what_changed": {
+                "type": "string",
+                "description": (
+                    "One-line summary of what changed vs previous memory "
+                    "(used as the git commit message). "
+                    "Example: 'Bot-1 paused, owner prefers morning briefings'"
+                ),
             },
         },
-        "required": ["farm_state"],
+        "required": ["rewritten_memory", "what_changed"],
     },
 }
 
 
 def apply_memory_update(inputs: dict) -> str:
-    """Write a structured memory update to ceo_memory.md."""
+    """Write rewritten memory and commit it to git."""
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    rewritten = inputs.get("rewritten_memory", "").strip()
+    what_changed = inputs.get("what_changed", "memory update").strip()
 
-    # Load existing memory to preserve history
-    existing = read_memory()
+    if not rewritten:
+        return json.dumps({"error": "rewritten_memory was empty"})
 
-    lines = [f"# PolyFarm CEO Memory\n_Last updated: {now}_\n"]
+    # Stamp the file with last-updated time
+    header = f"_Last updated: {now}_\n\n"
+    write_memory(header + rewritten)
 
-    lines.append("## Farm State\n" + inputs.get("farm_state", "").strip())
+    # Commit to git — free version history
+    commit_msg = f"CEO memory: {what_changed} [{now}]"
+    _git_commit_memory(commit_msg)
 
-    if inputs.get("action_items"):
-        lines.append("\n## Open Action Items")
-        for item in inputs["action_items"]:
-            lines.append(f"- {item}")
-
-    if inputs.get("user_preferences"):
-        lines.append("\n## Owner Preferences")
-        for pref in inputs["user_preferences"]:
-            lines.append(f"- {pref}")
-
-    if inputs.get("observations"):
-        lines.append("\n## Performance Observations")
-        for obs in inputs["observations"]:
-            lines.append(f"- {obs}")
-
-    if inputs.get("key_decisions"):
-        lines.append("\n## Key Decisions")
-        for dec in inputs["key_decisions"]:
-            lines.append(f"- {dec}")
-
-    # Append previous decision history (keep last 20 entries to avoid bloat)
-    if "## Key Decisions" in existing:
-        old_decisions = existing.split("## Key Decisions")[-1].strip().split("\n")
-        old_entries = [l for l in old_decisions if l.startswith("- ")][:20]
-        new_decisions = inputs.get("key_decisions", [])
-        # Merge: new first, then old (deduped)
-        all_decisions = new_decisions + [
-            e[2:] for e in old_entries if e[2:] not in new_decisions
-        ]
-        if all_decisions:
-            # Replace the decisions section
-            idx = lines.index("\n## Key Decisions") if "\n## Key Decisions" in lines else -1
-            if idx >= 0:
-                lines = lines[:idx + 1] + [f"- {d}" for d in all_decisions[:25]]
-
-    write_memory("\n".join(lines))
-    return json.dumps({"success": True, "memory_updated": now})
+    return json.dumps({
+        "success": True,
+        "memory_updated": now,
+        "committed": commit_msg,
+    })
