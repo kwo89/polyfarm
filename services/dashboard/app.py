@@ -139,11 +139,14 @@ def get_dashboard_data(days: int = 7) -> dict:
 
         mode_row = session.get(SystemConfig, "trading_mode")
         estop_row = session.get(SystemConfig, "emergency_stop")
+        # Read values inside session — avoids DetachedInstanceError after close
+        trading_mode = mode_row.value if mode_row else "paper"
+        emergency_stop = estop_row.value == "1" if estop_row else False
 
     return {
         "generated": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "days": days, "trading_mode": mode_row.value if mode_row else "paper",
-        "emergency_stop": estop_row.value == "1" if estop_row else False,
+        "days": days, "trading_mode": trading_mode,
+        "emergency_stop": emergency_stop,
         "bots": bots,
         "stats": {
             "total_detected": total_detected, "total_paper": len(paper_trades),
