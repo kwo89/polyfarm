@@ -143,6 +143,22 @@ def get_dashboard_data(days: int = 7) -> dict:
         ).all()
         skip_counts = {r or "unknown": c for r, c in skip_raw}
 
+        # Per-bot skipped counts
+        skipped_by_bot_raw = session.execute(
+            select(TargetTrade.bot_id, func.count(TargetTrade.id))
+            .where(TargetTrade.status == "skipped").where(TargetTrade.detected_at >= since)
+            .group_by(TargetTrade.bot_id)
+        ).all()
+        skipped_by_bot = {bot_names.get(bid, bid): cnt for bid, cnt in skipped_by_bot_raw}
+
+        # Per-bot detected counts
+        detected_by_bot_raw = session.execute(
+            select(TargetTrade.bot_id, func.count(TargetTrade.id))
+            .where(TargetTrade.detected_at >= since)
+            .group_by(TargetTrade.bot_id)
+        ).all()
+        detected_by_bot = {bot_names.get(bid, bid): cnt for bid, cnt in detected_by_bot_raw}
+
         total_detected = session.execute(
             select(func.count(TargetTrade.id)).where(TargetTrade.detected_at >= since)
         ).scalar_one() or 0
@@ -186,6 +202,7 @@ def get_dashboard_data(days: int = 7) -> dict:
             "pending": len(paper_trades) - len(resolved),
         },
         "paper_trades": paper_trades, "skip_reasons": skip_counts, "daily_pnl": daily,
+        "skipped_by_bot": skipped_by_bot, "detected_by_bot": detected_by_bot,
     }
 
 
@@ -511,8 +528,8 @@ function updateView() {
   // Filter trades by selected bot
   const botTrades = selectedBot ? d.paper_trades.filter(t => t.bot === selectedBot) : d.paper_trades;
   const stats = calcStats(botTrades);
-  const totalDetected = selectedBot ? null : d.stats.total_detected;
-  const totalSkipped  = selectedBot ? null : d.stats.total_skipped;
+  const totalDetected = selectedBot ? (d.detected_by_bot[selectedBot] || 0) : d.stats.total_detected;
+  const totalSkipped  = selectedBot ? (d.skipped_by_bot[selectedBot] || 0) : d.stats.total_skipped;
 
   // Update header label
   document.getElementById('bots-sub').textContent = selectedBot ? `Viewing: ${selectedBot} — click again to deselect` : d.bots.length + ' bot(s) · click to filter';
