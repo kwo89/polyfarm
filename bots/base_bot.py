@@ -15,7 +15,7 @@ import time
 import uuid
 from datetime import datetime, date
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 
 from core.config import settings
 from core.database import get_session
@@ -110,11 +110,14 @@ class CopyBot:
 
         new = [a for a in activity if a.get("transactionHash") not in seen]
 
-        # Mark all fetched hashes as seen (even skipped ones — avoids re-processing)
+        # Mark all fetched hashes as seen using INSERT OR IGNORE —
+        # safe on restart/restore: duplicates silently skipped, no crash
         with get_session() as session:
             for tx_hash in tx_hashes:
-                if tx_hash not in seen:
-                    session.add(SeenTransaction(bot_id=self.bot_id, tx_hash=tx_hash))
+                session.execute(
+                    text("INSERT OR IGNORE INTO seen_transactions (bot_id, tx_hash, seen_at) VALUES (:bot_id, :tx_hash, :seen_at)"),
+                    {"bot_id": self.bot_id, "tx_hash": tx_hash, "seen_at": datetime.utcnow().isoformat()}
+                )
 
         return new
 
