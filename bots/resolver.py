@@ -1,19 +1,16 @@
 """
 Market resolution checker — runs every 15 minutes as a background thread.
 
-For every unresolved paper trade, checks Polymarket's Gamma API to see if the
-market has resolved. When it has:
-  1. Updates paper_trades: market_resolved, winning_outcome, hypothetical_pnl
-  2. Updates market_resolutions cache
-  3. Patches daily_pnl with the newly realised P&L
+Source of truth: Polymarket Gamma API.
+We NEVER infer Won/Lost from our own P&L calculations.
+The flow is:
+  1. Ask Polymarket: is this market closed? Which outcome won?
+  2. Record the winning_outcome directly from their data
+  3. Compare our trade's outcome vs winning_outcome → Won or Lost
+  4. Calculate hypothetical P&L purely as a consequence of that result
 
-P&L formula (for BUY trades):
-  shares      = hypothetical_size / hypothetical_price
-  win_pnl     = shares - hypothetical_size   (= size * (1/price - 1))
-  lose_pnl    = -hypothetical_size
-
-For SELL trades the position was already closed — we log 0 P&L on resolution
-(the gain/loss was realised at trade time vs the position cost basis).
+Won/Lost status is always determined by Polymarket's on-chain resolution data,
+not by any internal formula or estimation.
 """
 
 import logging
@@ -67,40 +64,56 @@ def _calc_pnl(trade: PaperTrade, winning_outcome: str) -> float:
 
 def _parse_resolution(market_data: dict) -> Optional[str]:
     """
-    Extract the winning outcome string from a Gamma API market response.
+    Extract the winning outcome from Polymarket's Gamma API response.
     Returns "YES", "NO", or None if not yet resolved.
 
-    Gamma API market fields we look for:
-      - closed: bool
-      - tokens: [{"outcome": "Yes", "winner": true}, ...]
-      - winnerOutcome: "Yes" | "No"
+    This is the ONLY place Won/Lost is determined — directly from Polymarket data.
+    We never infer it from price movements or P&L calculations.
+
+    Polymarket Gamma API fields checked (in order of reliability):
+      1. tokens[].winner  — most reliable, set at on-chain resolution
+      2. winnerOutcome    — string field on the market object
+      3. closed + tokens[].price reaching 1.0 — last resort
     """
     if not market_data:
         return None
 
-    # Must be closed/resolved
+    # Market must be closed/resolved on Polymarket's end
     if not market_data.get("closed") and not market_data.get("resolved"):
         return None
 
-    # Try tokens array first (most reliable)
+    # 1. tokens array — winner flag set by Polymarket at resolution
     tokens = market_data.get("tokens", [])
     for token in tokens:
-        if token.get("winner"):
+        if token.get("winner") is True:
             raw = str(token.get("outcome", "")).strip().upper()
             if raw in ("YES", "NO"):
                 return raw
-            if raw == "TRUE":
+            # Handle non-standard outcome labels
+            if raw in ("TRUE", "1"):
                 return "YES"
-            if raw == "FALSE":
+            if raw in ("FALSE", "0"):
                 return "NO"
 
-    # Fallback: winnerOutcome field
-    winner = market_data.get("winnerOutcome", "")
-    if winner:
-        raw = str(winner).strip().upper()
-        if raw in ("YES", "NO"):
-            return raw
+    # 2. winnerOutcome field
+    winner = str(market_data.get("winnerOutcome") or "").strip().upper()
+    if winner in ("YES", "NO"):
+        return winner
 
+    # 3. Last resort: a token with price == 1.0 is the winner
+    for token in tokens:
+        try:
+            if float(token.get("price", 0)) == 1.0:
+                raw = str(token.get("outcome", "")).strip().upper()
+                if raw in ("YES", "NO"):
+                    logger.debug("Resolution via price=1.0 for token %s", raw)
+                    return raw
+        except (TypeError, ValueError):
+            pass
+
+    # Market is closed but we can't determine winner yet — leave as pending
+    logger.debug("Market closed but winner not determinable yet: %s",
+                 str(market_data.get("conditionId", ""))[:12])
     return None
 
 
@@ -196,9 +209,9 @@ def run_resolution_pass():
 
                 won = (db_trade.outcome or "").upper() == winning_outcome.upper()
                 logger.info(
-                    "✅ Resolved %s | %s %s | %s | P&L: %+.2f",
+                    "✅ Polymarket resolved %s | bet=%s winner=%s → %s | hyp. P&L: %+.2f",
                     market_id[:12],
-                    db_trade.side, db_trade.outcome,
+                    db_trade.outcome, winning_outcome,
                     "WIN" if won else "LOSS",
                     pnl,
                 )

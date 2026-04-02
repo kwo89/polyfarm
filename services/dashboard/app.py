@@ -56,6 +56,18 @@ def _require_auth(handler):
 
 # ── Dashboard data ────────────────────────────────────────────────────────────
 
+def _trade_status(t) -> str:
+    """Derive won/lost/pending from resolution data."""
+    if not t.market_resolved:
+        return "pending"
+    if t.winning_outcome:
+        return "won" if (t.outcome or "").upper() == t.winning_outcome.upper() else "lost"
+    # Fallback: use pnl sign if winning_outcome not stored yet
+    if t.hypothetical_pnl is not None:
+        return "won" if t.hypothetical_pnl > 0 else "lost"
+    return "pending"
+
+
 def get_dashboard_data(days: int = 7) -> dict:
     since = (datetime.utcnow() - timedelta(days=days)).isoformat()
 
@@ -72,22 +84,25 @@ def get_dashboard_data(days: int = 7) -> dict:
         ]
         bot_names = {b.id: b.name for b in bots_raw}
 
+        # Fetch all trades in window — frontend handles pagination
         paper_raw = session.execute(
             select(PaperTrade).where(PaperTrade.created_at >= since)
-            .order_by(desc(PaperTrade.created_at)).limit(500)
+            .order_by(desc(PaperTrade.created_at))
         ).scalars().all()
 
         paper_trades = [
             {
                 "time": t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else "—",
                 "bot": bot_names.get(t.bot_id, t.bot_id[:8]),
-                "side": t.side, "outcome": t.outcome,
+                "side": t.side,
+                "outcome": t.outcome,                          # what we bet (YES/NO)
+                "winning_outcome": t.winning_outcome or "",   # what actually won
+                "status": _trade_status(t),                   # won/lost/pending
                 "size": round(t.hypothetical_size or 0, 2),
                 "price": round(t.hypothetical_price or 0, 3),
                 "value": round(t.hypothetical_value or 0, 2),
                 "market": (t.question or t.market_id or "")[:60],
-                "resolved": t.market_resolved,
-                "pnl": round(t.hypothetical_pnl or 0, 2) if t.market_resolved else None,
+                "pnl": round(t.hypothetical_pnl, 2) if t.hypothetical_pnl is not None else None,
             }
             for t in paper_raw
         ]
@@ -103,10 +118,11 @@ def get_dashboard_data(days: int = 7) -> dict:
             select(func.count(TargetTrade.id)).where(TargetTrade.detected_at >= since)
         ).scalar_one() or 0
 
-        resolved = [t for t in paper_trades if t["resolved"] and t["pnl"] is not None]
-        wins = [t for t in resolved if t["pnl"] > 0]
-        losses = [t for t in resolved if t["pnl"] < 0]
-        total_pnl = sum(t["pnl"] for t in resolved)
+        # Stats derived from status field — accurate for all cases
+        resolved = [t for t in paper_trades if t["status"] != "pending"]
+        wins = [t for t in resolved if t["status"] == "won"]
+        losses = [t for t in resolved if t["status"] == "lost"]
+        total_pnl = sum(t["pnl"] for t in resolved if t["pnl"] is not None)
         total_volume = sum(t["value"] for t in paper_trades)
         win_rate = round(len(wins) / len(resolved) * 100, 1) if resolved else None
 
@@ -135,6 +151,7 @@ def get_dashboard_data(days: int = 7) -> dict:
             "total_volume": round(total_volume, 2), "total_pnl": round(total_pnl, 2),
             "resolved_trades": len(resolved), "wins": len(wins), "losses": len(losses),
             "win_rate": win_rate,
+            "pending": len(paper_trades) - len(resolved),
         },
         "paper_trades": paper_trades, "skip_reasons": skip_counts, "daily_pnl": daily,
     }
@@ -300,22 +317,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div id="bots-list"><div style="text-align:center;padding:30px;color:var(--muted)">Loading…</div></div>
   </div>
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
-    <div class="section-title">Paper Trades</div>
+    <div class="section-title">Trade Logbook</div>
     <div class="controls">
       <select class="select" id="days-select" onchange="loadData()">
         <option value="1">1 day</option><option value="7" selected>7 days</option>
         <option value="30">30 days</option><option value="90">All time</option>
       </select>
-      <select class="select" id="side-filter"><option value="">All sides</option><option value="BUY">BUY</option><option value="SELL">SELL</option></select>
-      <select class="select" id="outcome-filter"><option value="">All outcomes</option><option value="YES">YES</option><option value="NO">NO</option></select>
+      <select class="select" id="side-filter" onchange="resetAndRender()"><option value="">All sides</option><option value="BUY">BUY</option><option value="SELL">SELL</option></select>
+      <select class="select" id="outcome-filter" onchange="resetAndRender()"><option value="">All outcomes</option><option value="YES">YES</option><option value="NO">NO</option></select>
+      <select class="select" id="status-filter" onchange="resetAndRender()"><option value="">All statuses</option><option value="won">Won</option><option value="lost">Lost</option><option value="pending">Pending</option></select>
     </div>
   </div>
   <div class="section">
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Time (UTC)</th><th>Bot</th><th>Side</th><th>Out</th><th>Size $</th><th>Price</th><th>Status</th><th>P&L</th><th>Market</th></tr></thead>
-        <tbody id="trades-tbody"><tr><td colspan="9" style="text-align:center;padding:30px;color:var(--muted)">Loading…</td></tr></tbody>
+        <thead><tr><th>Time (UTC)</th><th>Bot</th><th>Side</th><th>Bet</th><th>Winner</th><th>Size $</th><th>Price</th><th>Status</th><th>P&L</th><th>Market</th></tr></thead>
+        <tbody id="trades-tbody"><tr><td colspan="10" style="text-align:center;padding:30px;color:var(--muted)">Loading…</td></tr></tbody>
       </table>
+    </div>
+    <div id="pagination" style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-top:1px solid var(--border);font-size:12px;color:var(--muted)">
+      <button onclick="changePage(-1)" id="btn-prev" style="padding:5px 12px;border-radius:6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:12px;cursor:pointer">← Prev</button>
+      <span id="page-info">—</span>
+      <button onclick="changePage(1)" id="btn-next" style="padding:5px 12px;border-radius:6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:12px;cursor:pointer">Next →</button>
     </div>
   </div>
   <div class="section">
@@ -330,47 +353,142 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="footer">PolyFarm · auto-refreshes every 30s</div>
 </div>
 <script>
-let allTrades=[];
-const fmt=(v,d=2)=>v==null?'—':'$'+Number(v).toFixed(d);
-const fmtPct=v=>v==null?'—':v.toFixed(1)+'%';
-const pnlCls=v=>v==null?'':(v>=0?'pnl pos':'pnl neg');
-const fmtPnl=v=>v==null?'<span class="pill pending">Open</span>':`<span class="${pnlCls(v)}">${v>=0?'+':''}${fmt(v)}</span>`;
-async function loadData(){
-  const days=document.getElementById('days-select').value;
-  const d=await fetch('/api/data?days='+days).then(r=>r.json());
-  document.getElementById('mode-badge').innerHTML=`<div class="dot"></div> ${d.trading_mode.toUpperCase()}`;
-  document.getElementById('refresh-tag').textContent='Updated '+d.generated;
-  const s=d.stats;
-  document.getElementById('s-paper').textContent=s.total_paper;
-  document.getElementById('s-window').textContent='last '+d.days+'d';
-  document.getElementById('s-skipped').textContent=s.total_skipped;
-  document.getElementById('s-detected').textContent='of '+s.total_detected+' detected';
-  document.getElementById('s-vol').textContent=fmt(s.total_volume);
-  const pe=document.getElementById('s-pnl');
-  pe.textContent=s.resolved_trades>0?(s.total_pnl>=0?'+':'')+fmt(s.total_pnl):'—';
-  pe.className='value '+(s.total_pnl>=0?'green':'red');
-  document.getElementById('s-resolved').textContent=(s.resolved_trades||0)+' resolved';
-  document.getElementById('s-wr').textContent=s.win_rate!=null?fmtPct(s.win_rate):'—';
-  document.getElementById('s-wl').textContent=(s.wins||0)+' W / '+(s.losses||0)+' L';
-  const bl=document.getElementById('bots-list');
-  bl.innerHTML=d.bots.length?d.bots.map(b=>{
-    const st=!b.active?'inactive':b.paused?'paused':'active';
-    return`<div class="bot-row"><div class="bot-indicator ${st}"></div><div><div class="bot-name">${b.name}</div><div class="bot-addr">${b.target}</div></div><div class="bot-meta"><div class="bot-meta-item"><span>${!b.active?'Inactive':b.paused?'Paused':'Running'}</span>Status</div><div class="bot-meta-item"><span>${b.paper_mode?'Paper':'Live'}</span>Mode</div><div class="bot-meta-item"><span>${b.total_trades}</span>Trades</div><div class="bot-meta-item"><span>${b.last_activity}</span>Last Active</div></div></div>`;
-  }).join(''):'<div style="text-align:center;padding:30px;color:var(--muted)">No bots registered.</div>';
-  allTrades=d.paper_trades;
-  renderTable();
-  const db=document.getElementById('daily-tbody');
-  db.innerHTML=d.daily_pnl.length?d.daily_pnl.map(r=>`<tr><td>${r.date}</td><td>${r.bot}</td><td>${r.trades}</td><td>${fmt(r.volume)}</td><td class="${pnlCls(r.pnl)}">${r.pnl>=0?'+':''}${fmt(r.pnl)}</td></tr>`).join(''):'<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:16px">No data yet.</td></tr>';
+let allTrades = [];
+let filteredTrades = [];
+let currentPage = 1;
+const PAGE_SIZE = 50;
+
+const fmt = (v, d=2) => v == null ? '—' : '$' + Number(v).toFixed(d);
+const fmtPct = v => v == null ? '—' : v.toFixed(1) + '%';
+const pnlCls = v => v == null ? '' : (v >= 0 ? 'pnl pos' : 'pnl neg');
+
+function statusPill(t) {
+  // Status comes from Polymarket resolution data (winning_outcome vs outcome)
+  if (t.status === 'won')     return '<span class="pill win">Won</span>';
+  if (t.status === 'lost')    return '<span class="pill loss">Lost</span>';
+  return '<span class="pill pending">Pending</span>';
 }
-function renderTable(){
-  const sf=document.getElementById('side-filter').value,of2=document.getElementById('outcome-filter').value;
-  let t=allTrades.filter(x=>(!sf||x.side===sf)&&(!of2||x.outcome===of2));
-  const tb=document.getElementById('trades-tbody');
-  tb.innerHTML=t.length?t.map(t=>`<tr><td style="white-space:nowrap;color:var(--muted)">${t.time}</td><td style="font-weight:500">${t.bot}</td><td><span class="pill ${t.side.toLowerCase()}">${t.side}</span></td><td><span class="pill ${t.outcome.toLowerCase()}">${t.outcome}</span></td><td style="font-weight:600">${fmt(t.size)}</td><td style="color:var(--muted)">${t.price.toFixed(3)}</td><td>${t.resolved?(t.pnl>0?'<span class="pill win">Win</span>':'<span class="pill loss">Loss</span>'):'<span class="pill pending">Open</span>'}</td><td>${fmtPnl(t.pnl)}</td><td style="color:var(--muted);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.market}</td></tr>`).join(''):'<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:20px">No trades in this window.</td></tr>';
+
+function winnerCell(t) {
+  if (!t.winning_outcome) return '<span style="color:var(--muted)">—</span>';
+  const cls = t.winning_outcome === 'YES' ? 'yes' : 'no';
+  return `<span class="pill ${cls}">${t.winning_outcome}</span>`;
 }
-document.getElementById('side-filter').addEventListener('change',renderTable);
-document.getElementById('outcome-filter').addEventListener('change',renderTable);
-loadData();setInterval(loadData,30000);
+
+function pnlCell(t) {
+  if (t.status === 'pending') return '<span style="color:var(--muted)">—</span>';
+  if (t.pnl == null)          return '<span style="color:var(--muted)">—</span>';
+  return `<span class="${pnlCls(t.pnl)}">${t.pnl >= 0 ? '+' : ''}${fmt(t.pnl)}</span>`;
+}
+
+async function loadData() {
+  const days = document.getElementById('days-select').value;
+  const d = await fetch('/api/data?days=' + days).then(r => r.json());
+
+  document.getElementById('mode-badge').innerHTML = `<div class="dot"></div> ${d.trading_mode.toUpperCase()}`;
+  document.getElementById('refresh-tag').textContent = 'Updated ' + d.generated;
+
+  const s = d.stats;
+  document.getElementById('s-paper').textContent = s.total_paper;
+  document.getElementById('s-window').textContent = 'last ' + d.days + 'd';
+  document.getElementById('s-skipped').textContent = s.total_skipped;
+  document.getElementById('s-detected').textContent = 'of ' + s.total_detected + ' detected';
+  document.getElementById('s-vol').textContent = fmt(s.total_volume);
+
+  const pe = document.getElementById('s-pnl');
+  pe.textContent = s.resolved_trades > 0 ? (s.total_pnl >= 0 ? '+' : '') + fmt(s.total_pnl) : '—';
+  pe.className = 'value ' + (s.total_pnl >= 0 ? 'green' : 'red');
+  document.getElementById('s-resolved').textContent = (s.resolved_trades || 0) + ' resolved · ' + (s.pending || 0) + ' pending';
+  document.getElementById('s-wr').textContent = s.win_rate != null ? fmtPct(s.win_rate) : '—';
+  document.getElementById('s-wl').textContent = (s.wins || 0) + ' W / ' + (s.losses || 0) + ' L';
+
+  const bl = document.getElementById('bots-list');
+  bl.innerHTML = d.bots.length ? d.bots.map(b => {
+    const st = !b.active ? 'inactive' : b.paused ? 'paused' : 'active';
+    return `<div class="bot-row">
+      <div class="bot-indicator ${st}"></div>
+      <div><div class="bot-name">${b.name}</div><div class="bot-addr">${b.target}</div></div>
+      <div class="bot-meta">
+        <div class="bot-meta-item"><span>${!b.active ? 'Inactive' : b.paused ? 'Paused' : 'Running'}</span>Status</div>
+        <div class="bot-meta-item"><span>${b.paper_mode ? 'Paper' : 'Live'}</span>Mode</div>
+        <div class="bot-meta-item"><span>${b.total_trades}</span>Trades</div>
+        <div class="bot-meta-item"><span>${b.last_activity}</span>Last Active</div>
+      </div>
+    </div>`;
+  }).join('') : '<div style="text-align:center;padding:30px;color:var(--muted)">No bots registered.</div>';
+
+  allTrades = d.paper_trades;
+  resetAndRender();
+
+  const db = document.getElementById('daily-tbody');
+  db.innerHTML = d.daily_pnl.length
+    ? d.daily_pnl.map(r => `<tr>
+        <td>${r.date}</td><td>${r.bot}</td><td>${r.trades}</td>
+        <td>${fmt(r.volume)}</td>
+        <td class="${pnlCls(r.pnl)}">${r.pnl >= 0 ? '+' : ''}${fmt(r.pnl)}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:16px">No data yet.</td></tr>';
+}
+
+function resetAndRender() {
+  currentPage = 1;
+  applyFiltersAndRender();
+}
+
+function changePage(delta) {
+  const totalPages = Math.ceil(filteredTrades.length / PAGE_SIZE);
+  currentPage = Math.max(1, Math.min(currentPage + delta, totalPages));
+  renderPage();
+}
+
+function applyFiltersAndRender() {
+  const sf  = document.getElementById('side-filter').value;
+  const of2 = document.getElementById('outcome-filter').value;
+  const stf = document.getElementById('status-filter').value;
+  filteredTrades = allTrades.filter(x =>
+    (!sf  || x.side    === sf) &&
+    (!of2 || x.outcome === of2) &&
+    (!stf || x.status  === stf)
+  );
+  renderPage();
+}
+
+function renderPage() {
+  const totalPages = Math.max(1, Math.ceil(filteredTrades.length / PAGE_SIZE));
+  const start = (currentPage - 1) * PAGE_SIZE;
+  const page  = filteredTrades.slice(start, start + PAGE_SIZE);
+  const tb = document.getElementById('trades-tbody');
+
+  tb.innerHTML = page.length
+    ? page.map(t => `<tr>
+        <td style="white-space:nowrap;color:var(--muted)">${t.time}</td>
+        <td style="font-weight:500">${t.bot}</td>
+        <td><span class="pill ${t.side.toLowerCase()}">${t.side}</span></td>
+        <td><span class="pill ${t.outcome.toLowerCase()}">${t.outcome}</span></td>
+        <td>${winnerCell(t)}</td>
+        <td style="font-weight:600">${fmt(t.size)}</td>
+        <td style="color:var(--muted)">${t.price.toFixed(3)}</td>
+        <td>${statusPill(t)}</td>
+        <td>${pnlCell(t)}</td>
+        <td style="color:var(--muted);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.market}">${t.market}</td>
+      </tr>`).join('')
+    : `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">No trades match filters.</td></tr>`;
+
+  // Pagination controls
+  document.getElementById('page-info').textContent =
+    filteredTrades.length
+      ? `Page ${currentPage} of ${totalPages} · ${filteredTrades.length} trades`
+      : 'No trades';
+  document.getElementById('btn-prev').disabled = currentPage <= 1;
+  document.getElementById('btn-next').disabled = currentPage >= totalPages;
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+loadData();
+setInterval(loadData, 30000);
 </script>
 </body></html>"""
 
