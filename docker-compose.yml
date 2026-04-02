@@ -2,21 +2,6 @@ version: "3.9"
 
 services:
 
-  # ── BOT RUNNER ─────────────────────────────────────────────────────────────
-  # Runs all active bots as threads. One container for now; scale later.
-  bots:
-    build: .
-    command: python -m bots.registry
-    env_file: .env
-    volumes:
-      - polyfarm_data:/app/data
-    restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "5"
-
   # ── DB INIT (runs once at startup, then exits) ────────────────────────────
   db_init:
     build: .
@@ -25,7 +10,41 @@ services:
     volumes:
       - polyfarm_data:/app/data
 
+  # ── BOT RUNNER ────────────────────────────────────────────────────────────
+  bots:
+    build: .
+    command: python -m bots.registry
+    env_file: .env
+    volumes:
+      - polyfarm_data:/app/data
+    restart: unless-stopped
+    depends_on:
+      db_init:
+        condition: service_completed_successfully
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # ── DASHBOARD ─────────────────────────────────────────────────────────────
+  dashboard:
+    build: .
+    command: python services/dashboard/app.py
+    env_file: .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - polyfarm_data:/app/data
+    restart: unless-stopped
+    depends_on:
+      db_init:
+        condition: service_completed_successfully
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+
 volumes:
   polyfarm_data:
-    # Named volume — persists the SQLite database across container restarts
-    # On Hetzner: stored in /var/lib/docker/volumes/polyfarm_polyfarm_data/

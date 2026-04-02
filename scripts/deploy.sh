@@ -34,7 +34,7 @@ fi
 echo "[3/4] Building image and starting services..."
 docker compose build --no-cache
 docker compose run --rm db_init
-docker compose up -d bots
+docker compose up -d bots dashboard
 
 # ── 4. Status check ───────────────────────────────────────────────────────────
 echo "[4/4] Status:"
