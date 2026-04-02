@@ -99,12 +99,16 @@ def _parse_resolution(market_data: dict) -> Optional[str]:
         except (TypeError, ValueError):
             pass
 
-    # 2. Gamma API format: explicit winner flag on token
+    # 2. Explicit winner flag (CLOB and Gamma both use this)
     for token in tokens:
         if token.get("winner") is True:
             raw = str(token.get("outcome", "")).strip().upper()
             if raw in ("YES", "NO"):
                 return raw
+            if raw in ("TRUE", "UP", "1"):
+                return "YES"
+            if raw in ("FALSE", "DOWN", "0"):
+                return "NO"
 
     # 3. Gamma API format: winnerOutcome string field
     winner = str(market_data.get("winnerOutcome") or "").strip().upper()
