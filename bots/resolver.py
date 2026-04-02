@@ -31,27 +31,25 @@ RESOLVE_INTERVAL_SEC = 15 * 60   # 15 minutes
 
 # ── P&L calculation ───────────────────────────────────────────────────────────
 
-def _calc_pnl(trade: PaperTrade, winning_outcome: str) -> float:
+def _calc_pnl_from_dict(trade: dict, winning_outcome: str) -> float:
     """
-    Calculate hypothetical P&L for a resolved paper trade.
+    Calculate hypothetical P&L from a plain trade dict.
 
     BUY: we spent hypothetical_size USD to buy shares at hypothetical_price.
          If our outcome wins → receive (size / price) USD → pnl = size*(1/price - 1)
          If our outcome loses → receive 0 → pnl = -size
 
-    SELL: position was closed at trade price; resolution doesn't create new P&L
-          (would need original cost basis to calculate accurately).
+    SELL: position already closed at trade price; resolution adds no further P&L.
     """
-    if trade.side == "SELL":
+    if trade.get("side") == "SELL":
         return 0.0
 
-    size = trade.hypothetical_size or 0.0
-    price = trade.hypothetical_price or 0.5
-
+    size  = trade.get("hypothetical_size")  or 0.0
+    price = trade.get("hypothetical_price") or 0.5
     if price <= 0:
-        price = 0.001  # guard against division by zero
+        price = 0.001
 
-    won = (trade.outcome or "").upper() == (winning_outcome or "").upper()
+    won = (trade.get("outcome") or "").upper() == (winning_outcome or "").upper()
 
     if won:
         shares = size / price
@@ -168,20 +166,38 @@ def run_resolution_pass():
     """
     Check all unresolved paper trades once.
     Groups by market_id to minimise API calls (one call per market, not per trade).
+    All ORM attribute access happens inside session blocks to avoid DetachedInstanceError.
     """
+    # Read everything we need while session is open — store as plain dicts
     with get_session() as session:
-        unresolved = session.execute(
+        rows = session.execute(
             select(PaperTrade).where(PaperTrade.market_resolved == False)
         ).scalars().all()
+
+        # Extract all fields while still inside session
+        unresolved = [
+            {
+                "id": t.id,
+                "market_id": t.market_id,
+                "question": t.question,
+                "outcome": t.outcome,
+                "side": t.side,
+                "hypothetical_size": t.hypothetical_size,
+                "hypothetical_price": t.hypothetical_price,
+                "bot_id": t.bot_id,
+                "created_at": t.created_at,
+            }
+            for t in rows
+        ]
 
     if not unresolved:
         logger.debug("Resolution pass: no unresolved trades.")
         return
 
     # Group by market_id
-    markets: dict[str, list[PaperTrade]] = {}
+    markets: dict[str, list[dict]] = {}
     for t in unresolved:
-        markets.setdefault(t.market_id, []).append(t)
+        markets.setdefault(t["market_id"], []).append(t)
 
     logger.info("Resolution pass: %d unresolved trades across %d markets",
                 len(unresolved), len(markets))
@@ -196,13 +212,13 @@ def run_resolution_pass():
             logger.warning("Could not fetch market %s: %s", market_id[:12], e)
             continue
 
-        # Update cache regardless of resolution status
+        # Update resolution cache
         with get_session() as session:
             cache = session.get(MarketResolution, market_id)
             if not cache:
                 cache = MarketResolution(market_id=market_id)
                 session.add(cache)
-            cache.question = market_data.get("question") or trades[0].question
+            cache.question = market_data.get("question") or trades[0]["question"]
             cache.resolved = winning_outcome is not None
             cache.winning_outcome = winning_outcome
             cache.last_checked = datetime.utcnow()
@@ -215,25 +231,23 @@ def run_resolution_pass():
         # Market is resolved — update all trades for it
         with get_session() as session:
             for trade in trades:
-                db_trade = session.get(PaperTrade, trade.id)
+                db_trade = session.get(PaperTrade, trade["id"])
                 if not db_trade or db_trade.market_resolved:
                     continue
 
-                pnl = _calc_pnl(db_trade, winning_outcome)
+                pnl = _calc_pnl_from_dict(trade, winning_outcome)
                 db_trade.market_resolved = True
                 db_trade.winning_outcome = winning_outcome
                 db_trade.hypothetical_pnl = pnl
 
-                trade_date = (db_trade.created_at or datetime.utcnow()).date()
-                _patch_daily_pnl(session, db_trade.bot_id, trade_date, pnl)
+                trade_date = (trade["created_at"] or datetime.utcnow()).date()
+                _patch_daily_pnl(session, trade["bot_id"], trade_date, pnl)
 
-                won = (db_trade.outcome or "").upper() == winning_outcome.upper()
+                won = (trade["outcome"] or "").upper() == winning_outcome.upper()
                 logger.info(
                     "✅ Polymarket resolved %s | bet=%s winner=%s → %s | hyp. P&L: %+.2f",
-                    market_id[:12],
-                    db_trade.outcome, winning_outcome,
-                    "WIN" if won else "LOSS",
-                    pnl,
+                    market_id[:12], trade["outcome"], winning_outcome,
+                    "WIN" if won else "LOSS", pnl,
                 )
                 resolved_count += 1
 
