@@ -1,0 +1,140 @@
+"""
+Hardcoded risk rules — no LLM involved.
+Every proposed trade passes through check_trade() before execution.
+All constants can be overridden via environment variables if needed.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from datetime import date, datetime
+from typing import Literal
+
+from sqlalchemy import func, select
+
+from core.database import get_session
+from core.models import DailyPnl, Position
+
+logger = logging.getLogger(__name__)
+
+# ── Risk constants ────────────────────────────────────────────────────────────
+MIN_TRADE_SIZE_USD: float = 1.00        # skip trades below $1
+MAX_TRADE_PCT: float = 0.08             # 8% of portfolio per single trade
+MAX_MARKET_PCT: float = 0.25           # 25% of portfolio in one market
+MIN_LIQUID_RESERVE_USD: float = 15.00  # always keep $15 undeployed
+DAILY_LOSS_LIMIT_PCT: float = 0.20     # halt bot if down >20% today
+MAX_CONCURRENT_MARKETS: int = 20
+
+
+@dataclass
+class TradeProposal:
+    bot_id: str
+    market_id: str
+    outcome: str                        # YES | NO
+    side: Literal["BUY", "SELL"]
+    proposed_size_usd: float            # already scaled to our portfolio
+    current_price: float                # 0.0–1.0
+
+
+@dataclass
+class RiskDecision:
+    approved: bool
+    reason: str                         # human-readable explanation
+
+
+def check_trade(proposal: TradeProposal, portfolio_balance: float) -> RiskDecision:
+    """
+    Runs all hardcoded risk checks in order.
+    Returns RiskDecision(approved=True/False, reason=...).
+    """
+    size = proposal.proposed_size_usd
+
+    # 1. Minimum size
+    if size < MIN_TRADE_SIZE_USD:
+        return RiskDecision(False, f"Below min size ${MIN_TRADE_SIZE_USD:.2f} (got ${size:.2f})")
+
+    # 2. Maximum per-trade size
+    max_allowed = portfolio_balance * MAX_TRADE_PCT
+    if size > max_allowed:
+        return RiskDecision(False, f"Exceeds max trade size ${max_allowed:.2f} (8% of ${portfolio_balance:.2f})")
+
+    # 3. Liquid reserve check
+    if (portfolio_balance - size) < MIN_LIQUID_RESERVE_USD:
+        return RiskDecision(False, f"Would breach liquid reserve ${MIN_LIQUID_RESERVE_USD:.2f}")
+
+    # 4. Daily loss limit
+    today = date.today().isoformat()
+    with get_session() as session:
+        row = session.execute(
+            select(DailyPnl).where(
+                DailyPnl.bot_id == proposal.bot_id,
+                DailyPnl.date == today,
+            )
+        ).scalar_one_or_none()
+        if row:
+            daily_loss = min(0.0, row.realized_pnl)
+            loss_limit = portfolio_balance * DAILY_LOSS_LIMIT_PCT
+            if abs(daily_loss) >= loss_limit:
+                return RiskDecision(False, f"Daily loss limit hit: ${daily_loss:.2f} >= ${loss_limit:.2f}")
+
+        # 5. Market exposure check (skip for SELL — reduces exposure)
+        if proposal.side == "BUY":
+            exposure = _get_market_exposure(session, proposal.bot_id, proposal.market_id)
+            max_market = portfolio_balance * MAX_MARKET_PCT
+            if (exposure + size) > max_market:
+                return RiskDecision(
+                    False,
+                    f"Market exposure would be ${exposure + size:.2f}, limit is ${max_market:.2f} (25%)"
+                )
+
+            # 6. Concurrent markets cap
+            active_markets = _count_active_markets(session, proposal.bot_id)
+            if active_markets >= MAX_CONCURRENT_MARKETS:
+                return RiskDecision(False, f"Already in {active_markets} markets (limit {MAX_CONCURRENT_MARKETS})")
+
+    return RiskDecision(True, "All checks passed")
+
+
+def calculate_scaled_size(
+    target_size_usd: float,
+    target_daily_capital: float,
+    our_balance: float,
+) -> float:
+    """
+    Proportional sizing: scale our trade relative to the target's capital.
+    E.g. if target trades $1000 and has $50,000 in play, and we have $100:
+        ratio = 100 / 50,000 = 0.002 → our_size = 1000 * 0.002 = $2
+    Floors at MIN_TRADE_SIZE_USD, returns 0.0 if below minimum.
+    """
+    if target_daily_capital <= 0:
+        return 0.0
+    ratio = our_balance / target_daily_capital
+    scaled = target_size_usd * ratio
+    return scaled if scaled >= MIN_TRADE_SIZE_USD else 0.0
+
+
+def _get_market_exposure(session, bot_id: str, market_id: str) -> float:
+    """Sum of current BUY positions in this market for this bot."""
+    rows = session.execute(
+        select(Position).where(
+            Position.bot_id == bot_id,
+            Position.market_id == market_id,
+        )
+    ).scalars().all()
+    return sum(
+        (p.size * (p.avg_cost or 0.0))
+        for p in rows
+        if p.size > 0
+    )
+
+
+def _count_active_markets(session, bot_id: str) -> int:
+    """Count distinct markets where the bot has open positions."""
+    result = session.execute(
+        select(func.count(Position.market_id.distinct())).where(
+            Position.bot_id == bot_id,
+            Position.size > 0,
+        )
+    ).scalar_one()
+    return result or 0
