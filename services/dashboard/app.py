@@ -583,6 +583,13 @@ function renderBots(bots, allPaperTrades) {
         <div class="bot-meta-item"><span>${fmt(bs.volume)}</span>Volume</div>
         <div class="bot-meta-item"><span>${pnlStr}</span>P&amp;L</div>
         <div class="bot-meta-item"><span>${b.last_activity}</span>Last Active</div>
+        <div class="bot-meta-item">
+          <a href="https://polymarket.com/profile/${b.target}" target="_blank" rel="noopener"
+             onclick="event.stopPropagation()"
+             style="display:inline-block;padding:3px 10px;border-radius:5px;font-size:11px;font-weight:600;background:rgba(99,102,241,.15);color:var(--accent);border:1px solid rgba(99,102,241,.3);text-decoration:none;white-space:nowrap">
+            View ↗
+          </a>
+        </div>
       </div>
     </div>`;
   }).join('');
