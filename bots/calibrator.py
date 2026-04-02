@@ -67,6 +67,9 @@ def calibrate_bot(bot_id: str) -> dict:
             ts = float(ts)
         except (TypeError, ValueError):
             continue
+        # Polymarket API returns timestamps in milliseconds — normalise to seconds
+        if ts > 1e11:
+            ts /= 1000.0
         if tx.get("type", "").upper() != "TRADE":
             continue
         try:
