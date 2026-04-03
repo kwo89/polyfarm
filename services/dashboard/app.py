@@ -1257,7 +1257,6 @@ async function loadBots() {
     const statusLabel = !b.active ? 'Inactive' : b.paused ? 'Paused' : '';
     const dotCls      = !b.active ? 'inactive' : b.paused ? 'paused' : 'active';
     const shortWallet = b.target.slice(0, 6) + '…' + b.target.slice(-6);
-    const ratio       = b.ratio_pct.toFixed(1) + '%';
     const actions = b.active
       ? (b.paused
           ? `<button class="btn-sm btn-resume"  onclick="updateBot('${b.id}','unpause')">Resume</button>`
@@ -1289,7 +1288,6 @@ async function loadBots() {
       <td class="mono" title="${b.target}">${shortWallet}</td>
       <td>$${b.our_capital.toFixed(0)}</td>
       <td style="color:var(--muted)">$${b.target_daily_capital.toFixed(0)}/day</td>
-      <td style="font-weight:600;color:var(--blue)">${ratio}</td>
       <td>${bucketsCell}</td>
       <td>${b.total_trades}</td>
       <td><div class="actions">${actions}${graphBtn}</div></td>
