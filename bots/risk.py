@@ -99,17 +99,39 @@ def check_trade(proposal: TradeProposal, portfolio_balance: float) -> RiskDecisi
     return RiskDecision(True, "All checks passed", adjusted_size=adjusted_size)
 
 
+TIER_PCTS = [0.01, 0.02, 0.03, 0.04, 0.05]   # 1% – 5% of our capital per tier
+
+
 def calculate_scaled_size(
     target_size_usd: float,
     target_daily_capital: float,
     our_balance: float,
+    bucket_thresholds: Optional[list] = None,
 ) -> float:
     """
-    Proportional sizing: scale our trade relative to the target's capital.
-    E.g. if target trades $1000 and has $50,000 in play, and we have $100:
-        ratio = 100 / 50,000 = 0.002 → our_size = 1000 * 0.002 = $2
-    Floors at MIN_TRADE_SIZE_USD, returns 0.0 if below minimum.
+    Tiered sizing (preferred): when bucket_thresholds [t1,t2,t3,t4] are set,
+    maps the target's trade size to one of 5 tiers (1%–5% of our capital).
+    Tier is determined by which of the 5 percentile buckets the target size falls into.
+
+    Fallback (no thresholds yet): proportional scaling by daily volume ratio.
+    Returns 0.0 if the resulting size is below MIN_TRADE_SIZE_USD (skip trade).
     """
+    if bucket_thresholds and len(bucket_thresholds) == 4 and all(t is not None for t in bucket_thresholds):
+        t1, t2, t3, t4 = bucket_thresholds
+        if target_size_usd <= t1:
+            tier = 0
+        elif target_size_usd <= t2:
+            tier = 1
+        elif target_size_usd <= t3:
+            tier = 2
+        elif target_size_usd <= t4:
+            tier = 3
+        else:
+            tier = 4
+        size = round(our_balance * TIER_PCTS[tier], 2)
+        return size if size >= MIN_TRADE_SIZE_USD else 0.0
+
+    # Fallback: proportional (used until first bucket calibration completes)
     if target_daily_capital <= 0:
         return 0.0
     ratio = our_balance / target_daily_capital

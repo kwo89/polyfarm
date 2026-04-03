@@ -221,6 +221,96 @@ def run_capital_update_pass():
             logger.exception("[capital] Error updating capital for %s: %s", bot_id, e)
 
 
+def calibrate_buckets(bot_id: str) -> dict:
+    """
+    Compute 20/40/60/80th percentile thresholds from the last 500 trades
+    of the target wallet. These define 5 buckets mapped to 1%–5% of our capital.
+    Runs at bot setup and every 7 days thereafter.
+    """
+    with get_session() as session:
+        bot = session.get(BotRegistry, bot_id)
+        if not bot or not bot.active:
+            return {}
+        name   = bot.name
+        wallet = bot.target_address
+
+    activity = get_wallet_activity(wallet, limit=500)
+
+    sizes = []
+    for tx in activity:
+        if tx.get("type") != "TRADE":
+            continue
+        try:
+            size = float(tx.get("usdcSize") or tx.get("size") or 0)
+        except (TypeError, ValueError):
+            continue
+        if size > 0:
+            sizes.append(size)
+
+    if len(sizes) < 5:
+        logger.info("[buckets] %s — only %d trades found, skipping bucket calibration", name, len(sizes))
+        return {"skipped": True, "reason": f"Only {len(sizes)} trades"}
+
+    sizes.sort()
+    n = len(sizes)
+
+    def pct(p: float) -> float:
+        return round(sizes[min(int(p / 100 * n), n - 1)], 2)
+
+    t1, t2, t3, t4 = pct(20), pct(40), pct(60), pct(80)
+
+    with get_session() as session:
+        bot = session.get(BotRegistry, bot_id)
+        if bot:
+            bot.bucket_t1, bot.bucket_t2 = t1, t2
+            bot.bucket_t3, bot.bucket_t4 = t3, t4
+
+    report = {
+        "bot_name":       name,
+        "trades_analyzed": len(sizes),
+        "min_trade":      sizes[0],
+        "max_trade":      sizes[-1],
+        "bucket_1_1pct":  f"$0 – ${t1}",
+        "bucket_2_2pct":  f"${t1} – ${t2}",
+        "bucket_3_3pct":  f"${t2} – ${t3}",
+        "bucket_4_4pct":  f"${t3} – ${t4}",
+        "bucket_5_5pct":  f"${t4}+",
+        "thresholds":     [t1, t2, t3, t4],
+        "calibrated_at":  datetime.utcnow().isoformat(),
+    }
+
+    with get_session() as session:
+        session.add(HealthEvent(
+            component=f"buckets:{name}",
+            event_type="bucket_calibration",
+            details=json.dumps(report),
+        ))
+
+    logger.info(
+        "[buckets] %s | $0–$%.2f (1%%) / $%.2f–$%.2f (2%%) / $%.2f–$%.2f (3%%) / $%.2f–$%.2f (4%%) / $%.2f+ (5%%) | %d trades",
+        name, t1, t1, t2, t2, t3, t3, t4, t4, len(sizes),
+    )
+    return report
+
+
+def run_bucket_calibration_pass():
+    """Calibrate bucket thresholds for all active bots."""
+    with get_session() as session:
+        bot_ids = [
+            b.id for b in session.execute(
+                select(BotRegistry).where(BotRegistry.active == True)
+            ).scalars().all()
+        ]
+    if not bot_ids:
+        return
+    logger.info("[buckets] Running bucket calibration for %d bot(s).", len(bot_ids))
+    for bot_id in bot_ids:
+        try:
+            calibrate_buckets(bot_id)
+        except Exception as e:
+            logger.exception("[buckets] Error calibrating buckets for %s: %s", bot_id, e)
+
+
 def run_calibration_pass():
     """Calibrate all active bots once."""
     with get_session() as session:
@@ -250,11 +340,16 @@ def run_calibrator_loop():
     """
     logger.info("[calibrator] Calibrator started — capital: daily, wallet volume: weekly.")
 
-    # Run both passes immediately at startup
+    # Run all passes immediately at startup
     try:
         run_capital_update_pass()
     except Exception as e:
         logger.exception("[calibrator] Startup capital update failed: %s", e)
+
+    try:
+        run_bucket_calibration_pass()
+    except Exception as e:
+        logger.exception("[calibrator] Startup bucket calibration failed: %s", e)
 
     try:
         run_calibration_pass()
@@ -272,6 +367,10 @@ def run_calibrator_loop():
             logger.exception("[calibrator] Daily capital update failed: %s", e)
 
         if day % 7 == 0:                          # every 7th day
+            try:
+                run_bucket_calibration_pass()
+            except Exception as e:
+                logger.exception("[calibrator] Weekly bucket calibration failed: %s", e)
             try:
                 run_calibration_pass()
             except Exception as e:

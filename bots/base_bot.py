@@ -43,8 +43,21 @@ class CopyBot:
             self.target_address = bot.target_address
             self.poll_interval = bot.poll_interval_sec
             self.paper_mode = bot.paper_mode
-            self.our_capital = bot.our_capital or settings.initial_portfolio_usd
-            self.target_daily_capital = bot.target_daily_capital or 2000.0
+            self._apply_bot_state(bot)
+
+    def _apply_bot_state(self, bot):
+        """Copy dynamic DB values into instance — call at load and on refresh."""
+        self.our_capital = bot.our_capital or settings.initial_portfolio_usd
+        self.target_daily_capital = bot.target_daily_capital or 2000.0
+        thresholds = [bot.bucket_t1, bot.bucket_t2, bot.bucket_t3, bot.bucket_t4]
+        self.bucket_thresholds = thresholds if all(t is not None for t in thresholds) else None
+
+    def _refresh_config(self):
+        """Reload dynamic values (capital, thresholds) from DB each poll cycle."""
+        with get_session() as session:
+            bot = session.get(BotRegistry, self.bot_id)
+            if bot:
+                self._apply_bot_state(bot)
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
@@ -71,6 +84,7 @@ class CopyBot:
 
     def _poll_and_process(self):
         """Fetch latest activity and process any new trades."""
+        self._refresh_config()   # pick up capital updates and new bucket thresholds
         try:
             activity = get_wallet_activity(self.target_address, limit=50)
         except Exception as e:
@@ -153,7 +167,7 @@ class CopyBot:
         # Calculate scaled size
         portfolio_balance = self._get_portfolio_balance()
         target_daily_capital = self._estimate_target_capital()
-        scaled_size = calculate_scaled_size(target_size, target_daily_capital, portfolio_balance)
+        scaled_size = calculate_scaled_size(target_size, target_daily_capital, portfolio_balance, self.bucket_thresholds)
 
         # Log target trade (always — full audit trail)
         target_trade_id = self._log_target_trade(

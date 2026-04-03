@@ -245,7 +245,23 @@ def api_add_bot(name: str, wallet: str, our_capital: float, poll_interval: int =
             total_trades=0,
         ))
 
-    return {"success": True, "message": f"Bot '{name}' registered. It will start tracking within 30 seconds."}
+    # Trigger bucket + volume calibration immediately in background
+    import threading
+    def _initial_calibrate(bid):
+        try:
+            from bots.calibrator import calibrate_buckets, calibrate_bot
+            calibrate_buckets(bid)
+            calibrate_bot(bid)
+        except Exception:
+            pass
+    with get_session() as session:
+        new_bot = session.execute(
+            select(BotRegistry).where(func.lower(BotRegistry.target_address) == wallet.lower())
+        ).scalar_one_or_none()
+        if new_bot:
+            threading.Thread(target=_initial_calibrate, args=(new_bot.id,), daemon=True).start()
+
+    return {"success": True, "message": f"Bot '{name}' registered. Calibrating buckets now — will start trading within 30 seconds."}
 
 
 def api_update_bot(bot_id: str, action: str, new_name: str = "", amount: float = 0.0) -> dict:
@@ -314,6 +330,8 @@ def get_all_bots() -> list:
                 "ratio_pct": round((b.our_capital or 0) / (b.target_daily_capital or 1) * 100, 2),
                 "total_trades": b.total_trades or 0,
                 "last_activity": b.last_activity_at.strftime("%Y-%m-%d %H:%M UTC") if b.last_activity_at else "Never",
+                "buckets": [b.bucket_t1, b.bucket_t2, b.bucket_t3, b.bucket_t4],
+                "buckets_ready": all(x is not None for x in [b.bucket_t1, b.bucket_t2, b.bucket_t3, b.bucket_t4]),
             }
             for b in bots
         ]
@@ -1111,6 +1129,7 @@ BOTS_HTML = """<!DOCTYPE html>
         <thead><tr>
           <th>Status</th><th>Name</th><th>Wallet</th>
           <th>Capital</th><th>Target Daily Vol</th><th>Ratio</th>
+          <th>Sizing Buckets</th>
           <th>Mode</th><th>Trades</th><th>Last Active</th><th>Actions</th>
         </tr></thead>
         <tbody id="bots-tbody"><tr><td colspan="10" style="text-align:center;padding:30px;color:var(--muted)">Loading…</td></tr></tbody>
@@ -1147,6 +1166,12 @@ async function loadBots() {
               style="display:inline-flex;align-items:center;padding:4px 10px;border-radius:5px;font-size:11px;font-weight:600;background:rgba(99,102,241,.12);color:var(--accent);border:1px solid rgba(99,102,241,.3);text-decoration:none">View ↗</a>`
       : '<span style="color:var(--muted);font-size:11px">Deactivated</span>';
 
+    const bucketsCell = b.buckets_ready
+      ? `<span style="font-size:11px;color:var(--muted)" title="Bucket thresholds (20/40/60/80th pct of target trades)">
+           $0–$${b.buckets[0]} · $${b.buckets[1]} · $${b.buckets[2]} · $${b.buckets[3]}+
+         </span>`
+      : `<span style="font-size:11px;color:var(--yellow)">Calibrating…</span>`;
+
     return `<tr>
       <td><span class="dot ${dotCls}"></span>${statusLabel}</td>
       <td style="font-weight:600">${b.name}</td>
@@ -1154,6 +1179,7 @@ async function loadBots() {
       <td>$${b.our_capital.toFixed(0)}</td>
       <td style="color:var(--muted)">$${b.target_daily_capital.toFixed(0)}/day</td>
       <td style="font-weight:600;color:var(--blue)">${ratio}</td>
+      <td>${bucketsCell}</td>
       <td><span class="pill ${b.paper_mode ? 'paper' : 'live'}">${b.paper_mode ? 'Paper' : 'Live'}</span></td>
       <td>${b.total_trades}</td>
       <td style="color:var(--muted);font-size:12px">${b.last_activity}</td>

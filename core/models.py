@@ -93,6 +93,10 @@ class BotRegistry(Base):
     our_capital = Column(Float, default=100.0)           # current capital — updated daily by P&L
     initial_capital = Column(Float, default=None)        # locked starting capital — never changes
     target_daily_capital = Column(Float, default=2000.0) # target's estimated daily volume (auto-updated weekly)
+    bucket_t1 = Column(Float, default=None)              # 20th pct of target trade sizes → tier 1/2 boundary
+    bucket_t2 = Column(Float, default=None)              # 40th pct → tier 2/3 boundary
+    bucket_t3 = Column(Float, default=None)              # 60th pct → tier 3/4 boundary
+    bucket_t4 = Column(Float, default=None)              # 80th pct → tier 4/5 boundary
     paper_mode = Column(Boolean, default=True)
     active = Column(Boolean, default=True)
     paused = Column(Boolean, default=False)
