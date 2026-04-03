@@ -162,11 +162,11 @@ class CopyBot:
         )
 
         if scaled_size <= 0:
-            self._mark_target_trade(target_trade_id, "skipped", "Scaled size below minimum $1.00")
-            logger.info("[%s] Skipping trade (scaled size $%.2f < $1.00)", self.name, scaled_size)
+            self._mark_target_trade(target_trade_id, "skipped", f"Scaled size below minimum ${0.50:.2f}")
+            logger.info("[%s] Skipping trade (scaled size $%.2f < $0.50)", self.name, scaled_size)
             return
 
-        # Risk check
+        # Risk check — may cap size at MAX_TRADE_PCT instead of rejecting
         proposal = TradeProposal(
             bot_id=self.bot_id,
             market_id=market_id,
@@ -182,11 +182,16 @@ class CopyBot:
             logger.info("[%s] Trade REJECTED: %s", self.name, decision.reason)
             return
 
+        # Use capped size if risk module reduced it (oversized trade → max allowed)
+        final_size = decision.adjusted_size if decision.adjusted_size is not None else scaled_size
+        if final_size != scaled_size:
+            logger.info("[%s] Trade size capped $%.2f → $%.2f (8%% max)", self.name, scaled_size, final_size)
+
         # Execute (paper or live)
         if self.paper_mode:
-            self._execute_paper(target_trade_id, market_id, question, outcome, side, scaled_size, target_price)
+            self._execute_paper(target_trade_id, market_id, question, outcome, side, final_size, target_price)
         else:
-            self._execute_live(target_trade_id, market_id, question, outcome, side, scaled_size, target_price)
+            self._execute_live(target_trade_id, market_id, question, outcome, side, final_size, target_price)
 
     def _parse_outcome(self, tx: dict) -> str:
         """

@@ -7,9 +7,9 @@ All constants can be overridden via environment variables if needed.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Literal
+from typing import Literal, Optional
 
 from sqlalchemy import func, select
 
@@ -19,7 +19,7 @@ from core.models import DailyPnl, Position
 logger = logging.getLogger(__name__)
 
 # ── Risk constants ────────────────────────────────────────────────────────────
-MIN_TRADE_SIZE_USD: float = 1.00        # skip trades below $1
+MIN_TRADE_SIZE_USD: float = 0.50        # skip trades below $0.50
 MAX_TRADE_PCT: float = 0.08             # 8% of portfolio per single trade
 MAX_MARKET_PCT: float = 0.25           # 25% of portfolio in one market
 MIN_LIQUID_RESERVE_USD: float = 15.00  # always keep $15 undeployed
@@ -41,6 +41,7 @@ class TradeProposal:
 class RiskDecision:
     approved: bool
     reason: str                         # human-readable explanation
+    adjusted_size: Optional[float] = None  # set when trade is capped to max; use this size
 
 
 def check_trade(proposal: TradeProposal, portfolio_balance: float) -> RiskDecision:
@@ -49,15 +50,17 @@ def check_trade(proposal: TradeProposal, portfolio_balance: float) -> RiskDecisi
     Returns RiskDecision(approved=True/False, reason=...).
     """
     size = proposal.proposed_size_usd
+    adjusted_size: Optional[float] = None
 
-    # 1. Minimum size
+    # 1. Minimum size — skip if below $0.50
     if size < MIN_TRADE_SIZE_USD:
         return RiskDecision(False, f"Below min size ${MIN_TRADE_SIZE_USD:.2f} (got ${size:.2f})")
 
-    # 2. Maximum per-trade size
-    max_allowed = portfolio_balance * MAX_TRADE_PCT
+    # 2. Maximum per-trade size — cap and continue instead of skipping
+    max_allowed = round(portfolio_balance * MAX_TRADE_PCT, 2)
     if size > max_allowed:
-        return RiskDecision(False, f"Exceeds max trade size ${max_allowed:.2f} (8% of ${portfolio_balance:.2f})")
+        size = max_allowed
+        adjusted_size = size
 
     # 3. Liquid reserve check
     if (portfolio_balance - size) < MIN_LIQUID_RESERVE_USD:
@@ -78,7 +81,7 @@ def check_trade(proposal: TradeProposal, portfolio_balance: float) -> RiskDecisi
             if abs(daily_loss) >= loss_limit:
                 return RiskDecision(False, f"Daily loss limit hit: ${daily_loss:.2f} >= ${loss_limit:.2f}")
 
-        # 5. Market exposure check (skip for SELL — reduces exposure)
+        # 5. Market exposure check (uses capped size; skip for SELL — reduces exposure)
         if proposal.side == "BUY":
             exposure = _get_market_exposure(session, proposal.bot_id, proposal.market_id)
             max_market = portfolio_balance * MAX_MARKET_PCT
@@ -93,7 +96,7 @@ def check_trade(proposal: TradeProposal, portfolio_balance: float) -> RiskDecisi
             if active_markets >= MAX_CONCURRENT_MARKETS:
                 return RiskDecision(False, f"Already in {active_markets} markets (limit {MAX_CONCURRENT_MARKETS})")
 
-    return RiskDecision(True, "All checks passed")
+    return RiskDecision(True, "All checks passed", adjusted_size=adjusted_size)
 
 
 def calculate_scaled_size(
