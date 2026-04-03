@@ -478,7 +478,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/data":
             qs = parse_qs(parsed.query)
             days = int(qs.get("days", ["7"])[0])
-            self._json(get_dashboard_data(days=days))
+            try:
+                self._json(get_dashboard_data(days=days))
+            except Exception as e:
+                import traceback
+                self._json({"error": str(e), "traceback": traceback.format_exc()})
 
         elif parsed.path == "/api/skipped":
             qs = parse_qs(parsed.query)
@@ -907,6 +911,11 @@ function renderBots(bots, allPaperTrades) {
 async function loadData() {
   const days = document.getElementById('days-select').value;
   allData = await fetch('/api/data?days=' + days).then(r => r.json());
+
+  if (allData.error) {
+    document.getElementById('bots-list').innerHTML = `<div style="padding:20px;color:var(--red);font-family:monospace;font-size:12px;white-space:pre-wrap">API Error: ${allData.error}\n\n${allData.traceback||''}</div>`;
+    return;
+  }
 
   document.getElementById('mode-badge').innerHTML = `<div class="dot"></div> ${allData.trading_mode.toUpperCase()}`;
   document.getElementById('refresh-tag').textContent = 'Updated ' + allData.generated;
