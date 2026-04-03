@@ -403,39 +403,51 @@ def get_all_bots() -> list:
     with get_session() as session:
         bots = session.execute(select(BotRegistry).order_by(BotRegistry.active.desc())).scalars().all()
 
-        # Single query: per-bot realized P&L, locked capital, resolved/pending counts
-        stats_rows = session.execute(
+        # Build reset_at map for filtering
+        reset_at_map = {b.id: b.reset_at for b in bots if b.reset_at}
+
+        # Per-bot stats — one row per bot, filtered by reset_at in Python after fetch
+        all_trades = session.execute(
             select(
                 PaperTrade.bot_id,
-                func.coalesce(func.sum(
-                    case((PaperTrade.market_resolved == True, PaperTrade.hypothetical_pnl), else_=0)
-                ), 0).label("realized_pnl"),
-                func.coalesce(func.sum(
-                    case((PaperTrade.market_resolved == False, PaperTrade.hypothetical_value), else_=0)
-                ), 0).label("locked"),
-                func.sum(case((PaperTrade.market_resolved == True, 1), else_=0)).label("resolved_count"),
-                func.sum(case((PaperTrade.market_resolved == False, 1), else_=0)).label("pending_count"),
-            ).group_by(PaperTrade.bot_id)
+                PaperTrade.market_resolved,
+                PaperTrade.hypothetical_pnl,
+                PaperTrade.hypothetical_value,
+                PaperTrade.created_at,
+            )
         ).all()
-        stats = {r.bot_id: r for r in stats_rows}
+
+        # Aggregate per bot, respecting reset_at
+        from collections import defaultdict
+        agg = defaultdict(lambda: {"realized_pnl": 0.0, "pending_count": 0, "resolved_count": 0})
+        for row in all_trades:
+            reset = reset_at_map.get(row.bot_id)
+            if reset and row.created_at and row.created_at < reset:
+                continue
+            a = agg[row.bot_id]
+            if row.market_resolved:
+                a["realized_pnl"] += row.hypothetical_pnl or 0.0
+                a["resolved_count"] += 1
+            else:
+                a["pending_count"] += 1
 
         result = []
         for b in bots:
-            s = stats.get(b.id)
-            initial   = b.initial_capital or b.our_capital or 0
-            realized  = round(float(s.realized_pnl), 2) if s else 0.0
-            locked    = round(float(s.locked), 2)       if s else 0.0
-            resolved  = int(s.resolved_count)           if s else 0
-            pending   = int(s.pending_count)            if s else 0
-            liquid    = round(initial + realized - locked, 2)
+            a       = agg.get(b.id, {})
+            initial = b.initial_capital or b.our_capital or 0
+            realized = round(a.get("realized_pnl", 0.0), 2)
+            resolved = a.get("resolved_count", 0)
+            pending  = a.get("pending_count", 0)
+            # Capital = starting capital + resolved P&L (no locked subtraction —
+            # paper trading doesn't actually lock capital; subtracting all open
+            # positions produces misleadingly large negatives as trades accumulate)
+            capital = round(initial + realized, 2)
             result.append({
                 "id": b.id, "name": b.name, "target": b.target_address,
                 "active": b.active, "paused": b.paused, "paper_mode": b.paper_mode,
-                "our_capital": b.our_capital or 0,
+                "our_capital": capital,
                 "initial_capital": initial,
-                "liquid_capital": liquid,
                 "realized_pnl": realized,
-                "locked_capital": locked,
                 "resolved_count": resolved,
                 "pending_count": pending,
                 "target_daily_capital": b.target_daily_capital or 0,
@@ -1475,13 +1487,15 @@ async function loadBots() {
       <td style="font-weight:600">${b.name}</td>
       <td class="mono" title="${b.target}">${shortWallet}</td>
       <td>
-        <div style="font-weight:600;color:${b.liquid_capital < 0 ? 'var(--red)' : 'var(--text)'}">$${b.liquid_capital.toFixed(2)}</div>
+        <div style="font-weight:600">$${b.our_capital.toFixed(2)}</div>
         <div style="font-size:10px;color:var(--muted);margin-top:2px">
-          🔒 $${b.locked_capital.toFixed(2)} locked &nbsp;·&nbsp;
+          start $${b.initial_capital.toFixed(2)} &nbsp;·&nbsp;
+          p&l <span style="color:${b.realized_pnl >= 0 ? 'var(--green)' : 'var(--red)'}">${b.realized_pnl >= 0 ? '+' : ''}$${b.realized_pnl.toFixed(2)}</span>
+        </div>
+        <div style="font-size:10px;color:var(--muted)">
           <span style="color:var(--green)">${b.resolved_count} resolved</span> /
           <span style="color:var(--yellow)">${b.pending_count} pending</span>
         </div>
-        <div style="font-size:10px;color:var(--muted)">start $${b.initial_capital.toFixed(2)} · p&l ${b.realized_pnl >= 0 ? '+' : ''}$${b.realized_pnl.toFixed(2)}</div>
       </td>
       <td style="color:var(--muted)">$${b.target_daily_capital.toFixed(0)}/day</td>
       <td>${bucketsCell}</td>
