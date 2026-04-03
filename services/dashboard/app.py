@@ -120,15 +120,26 @@ def get_dashboard_data(days: int = 7) -> dict:
             .order_by(desc(PaperTrade.created_at))
         ).scalars().all()
 
+        # Fetch target sizes for each paper trade (what the wallet actually traded)
+        target_size_map = {}
+        target_ids = [t.target_trade_id for t in paper_raw if t.target_trade_id]
+        if target_ids:
+            tt_rows = session.execute(
+                select(TargetTrade.id, TargetTrade.target_size)
+                .where(TargetTrade.id.in_(target_ids))
+            ).all()
+            target_size_map = {row.id: row.target_size for row in tt_rows}
+
         paper_trades = [
             {
                 "time": t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else "—",
                 "bot": bot_names.get(t.bot_id, t.bot_id[:8]),
                 "side": t.side,
-                "outcome": t.outcome,                          # what we bet (YES/NO)
-                "winning_outcome": t.winning_outcome or "",   # what actually won
-                "status": _trade_status(t),                   # won/lost/pending
+                "outcome": t.outcome,
+                "winning_outcome": t.winning_outcome or "",
+                "status": _trade_status(t),
                 "size": round(t.hypothetical_size or 0, 2),
+                "target_size": round(target_size_map.get(t.target_trade_id) or 0, 2),
                 "price": round(t.hypothetical_price or 0, 3),
                 "value": round(t.hypothetical_value or 0, 2),
                 "market": (t.question or t.market_id or "")[:60],
@@ -658,8 +669,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="section">
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Time (UTC)</th><th>Bot</th><th>Side</th><th>Bet</th><th>Winner</th><th>Size $</th><th>Price</th><th>Status</th><th>P&L</th><th>Market</th></tr></thead>
-        <tbody id="trades-tbody"><tr><td colspan="10" style="text-align:center;padding:30px;color:var(--muted)">Loading…</td></tr></tbody>
+        <thead><tr><th>Time (UTC)</th><th>Bot</th><th>Side</th><th>Bet</th><th>Winner</th><th>Target $</th><th>Our $</th><th>Price</th><th>Status</th><th>P&L</th><th>Market</th></tr></thead>
+        <tbody id="trades-tbody"><tr><td colspan="11" style="text-align:center;padding:30px;color:var(--muted)">Loading…</td></tr></tbody>
       </table>
     </div>
     <div id="pagination" style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-top:1px solid var(--border);font-size:12px;color:var(--muted)">
@@ -898,13 +909,14 @@ function renderPage() {
         <td><span class="pill ${t.side.toLowerCase()}">${t.side}</span></td>
         <td><span class="pill ${t.outcome.toLowerCase()}">${t.outcome}</span></td>
         <td>${winnerCell(t)}</td>
+        <td style="color:var(--muted)">${t.target_size > 0 ? fmt(t.target_size) : '—'}</td>
         <td style="font-weight:600">${fmt(t.size)}</td>
         <td style="color:var(--muted)">${t.price.toFixed(3)}</td>
         <td>${statusPill(t)}</td>
         <td>${pnlCell(t)}</td>
         <td style="color:var(--muted);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.market}">${t.market}</td>
       </tr>`).join('')
-    : `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">No trades match filters.</td></tr>`;
+    : `<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:20px">No trades match filters.</td></tr>`;
 
   document.getElementById('page-info').textContent =
     filteredTrades.length
