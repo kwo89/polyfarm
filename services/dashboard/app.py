@@ -458,7 +458,8 @@ def get_all_bots() -> list:
                 "last_activity": _to_london(b.last_activity_at) if b.last_activity_at else "Never",
                 "buckets": [b.bucket_t1, b.bucket_t2, b.bucket_t3, b.bucket_t4],
                 "buckets_ready": all(x is not None for x in [b.bucket_t1, b.bucket_t2, b.bucket_t3, b.bucket_t4]),
-                "reset_at": b.reset_at.isoformat() if b.reset_at else None,
+                "reset_at": _to_london(b.reset_at) if b.reset_at else None,
+                "created_at": _to_london(b.created_at) if b.created_at else None,
             })
         return result
 
@@ -1487,7 +1488,14 @@ async function loadBots() {
       <td style="text-align:center" title="${!b.active ? 'Inactive' : b.paused ? 'Paused' : 'Running'}">
         <span class="dot ${dotCls}"></span>${statusLabel ? `<span style="font-size:11px;color:var(--muted)">${statusLabel}</span>` : ''}
       </td>
-      <td style="font-weight:600">${b.name}</td>
+      <td>
+        <div style="font-weight:600">${b.name}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px">
+          ${b.reset_at
+            ? `↺ Reset ${b.reset_at}`
+            : `▶ Trading since ${b.created_at || '—'}`}
+        </div>
+      </td>
       <td class="mono" title="${b.target}">${shortWallet}</td>
       <td>
         <div style="font-weight:600">$${b.our_capital.toFixed(2)}</div>
