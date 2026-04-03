@@ -1394,19 +1394,17 @@ async function loadBots() {
         + `<button class="btn-sm" style="background:rgba(239,68,68,.08);color:var(--red);border:1px solid rgba(239,68,68,.25)" onclick="withdrawCapital('${b.id}','${b.name}',${b.our_capital})">– Capital</button>`
         + `<button class="btn-sm" style="background:rgba(239,68,68,.08);color:var(--red);border:1px solid rgba(239,68,68,.25)" onclick="resetBot('${b.id}','${b.name}')">Reset</button>`
         + `<button class="btn-sm btn-deactivate" onclick="confirmDeactivate('${b.id}','${b.name}')">Deactivate</button>`
-        + `<a href="https://polymarket.com/profile/${b.target}" target="_blank" rel="noopener"
-              style="display:inline-flex;align-items:center;padding:4px 10px;border-radius:5px;font-size:11px;font-weight:600;background:rgba(99,102,241,.12);color:var(--accent);border:1px solid rgba(99,102,241,.3);text-decoration:none">View ↗</a>`
       : '<span style="color:var(--muted);font-size:11px">Deactivated</span>'
         + `<button class="btn-sm" style="background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.4)" onclick="deleteBot('${b.id}','${b.name}')">Delete</button>`;
     const graphBtn = '';
 
     const bucketsCell = b.buckets_ready
-      ? `<div style="font-size:11px;line-height:1.7;font-family:monospace">
-           <div><span style="color:var(--muted)">1%</span> <span style="color:var(--text)">$0 – $${b.buckets[0]}</span></div>
-           <div><span style="color:var(--muted)">2%</span> <span style="color:var(--text)">$${b.buckets[0]} – $${b.buckets[1]}</span></div>
-           <div><span style="color:var(--muted)">3%</span> <span style="color:var(--text)">$${b.buckets[1]} – $${b.buckets[2]}</span></div>
-           <div><span style="color:var(--muted)">4%</span> <span style="color:var(--text)">$${b.buckets[2]} – $${b.buckets[3]}</span></div>
-           <div><span style="color:var(--muted)">5%</span> <span style="color:var(--text)">$${b.buckets[3]}+</span></div>
+      ? `<div style="display:grid;grid-template-columns:auto 1fr;column-gap:8px;row-gap:1px;font-size:11px;font-family:monospace;white-space:nowrap">
+           <span style="color:var(--muted)">1%</span><span>$0 – $${b.buckets[0]}</span>
+           <span style="color:var(--muted)">2%</span><span>$${b.buckets[0]} – $${b.buckets[1]}</span>
+           <span style="color:var(--muted)">3%</span><span>$${b.buckets[1]} – $${b.buckets[2]}</span>
+           <span style="color:var(--muted)">4%</span><span>$${b.buckets[2]} – $${b.buckets[3]}</span>
+           <span style="color:var(--muted)">5%</span><span>$${b.buckets[3]}+</span>
          </div>`
       : `<span style="font-size:11px;color:var(--yellow)">Calibrating…</span>`;
 
