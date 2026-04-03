@@ -241,6 +241,7 @@ def api_add_bot(name: str, wallet: str, our_capital: float, poll_interval: int =
             poll_interval_sec=poll_interval,
             target_daily_capital=2000.0,   # seed — calibrator updates within minutes
             our_capital=our_capital,
+            initial_capital=our_capital,   # locked forever — capital update uses this as base
             total_trades=0,
         ))
 
@@ -284,6 +285,7 @@ def get_all_bots() -> list:
                 "id": b.id, "name": b.name, "target": b.target_address,
                 "active": b.active, "paused": b.paused, "paper_mode": b.paper_mode,
                 "our_capital": b.our_capital or 0,
+                "initial_capital": b.initial_capital or b.our_capital or 0,
                 "target_daily_capital": b.target_daily_capital or 0,
                 "ratio_pct": round((b.our_capital or 0) / (b.target_daily_capital or 1) * 100, 2),
                 "total_trades": b.total_trades or 0,

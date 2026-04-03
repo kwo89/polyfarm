@@ -19,16 +19,17 @@ import logging
 import time
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from core.database import get_session
-from core.models import BotRegistry, HealthEvent
+from core.models import BotRegistry, HealthEvent, PaperTrade
 from services.polymarket.data_api import get_wallet_activity
 
 logger = logging.getLogger(__name__)
 
-CALIBRATION_INTERVAL_SEC = 7 * 24 * 60 * 60   # run every 7 days
-MIN_TRADES_FOR_CALIBRATION = 5                  # need at least 5 trades to trust the estimate
+CAPITAL_UPDATE_INTERVAL_SEC = 24 * 60 * 60     # run every 24 hours
+CALIBRATION_INTERVAL_SEC    = 7 * 24 * 60 * 60 # run every 7 days
+MIN_TRADES_FOR_CALIBRATION  = 5                 # need at least 5 trades to trust the estimate
 
 
 def calibrate_bot(bot_id: str) -> dict:
@@ -139,6 +140,87 @@ def calibrate_bot(bot_id: str) -> dict:
     return report
 
 
+def recalibrate_capital(bot_id: str) -> dict:
+    """
+    Recompute our_capital = initial_capital + cumulative resolved P&L.
+    Runs daily so scaling ratio always reflects real bankroll.
+    """
+    with get_session() as session:
+        bot = session.get(BotRegistry, bot_id)
+        if not bot or not bot.active:
+            return {}
+        name        = bot.name
+        old_capital = bot.our_capital or 100.0
+
+        # Lock in initial_capital on first run — never changed after this
+        if bot.initial_capital is None:
+            bot.initial_capital = old_capital
+            session.flush()
+
+        initial = bot.initial_capital
+
+    # Sum ALL resolved hypothetical P&L for this bot
+    with get_session() as session:
+        cumulative_pnl = session.execute(
+            select(func.sum(PaperTrade.hypothetical_pnl))
+            .where(PaperTrade.bot_id == bot_id)
+            .where(PaperTrade.market_resolved == True)
+            .where(PaperTrade.hypothetical_pnl.is_not(None))
+        ).scalar_one() or 0.0
+
+    new_capital = round(max(initial + cumulative_pnl, 1.0), 2)  # floor at $1
+
+    with get_session() as session:
+        bot = session.get(BotRegistry, bot_id)
+        if bot:
+            bot.our_capital = new_capital
+
+    change_usd = round(new_capital - old_capital, 2)
+    change_pct = round(change_usd / old_capital * 100, 2) if old_capital else 0
+
+    report = {
+        "bot_name":         name,
+        "initial_capital":  initial,
+        "cumulative_pnl":   round(cumulative_pnl, 2),
+        "old_capital":      old_capital,
+        "new_capital":      new_capital,
+        "change_usd":       change_usd,
+        "change_pct":       change_pct,
+        "updated_at":       datetime.utcnow().isoformat(),
+    }
+
+    with get_session() as session:
+        session.add(HealthEvent(
+            component=f"capital_update:{name}",
+            event_type="capital_recalibration",
+            details=json.dumps(report),
+        ))
+
+    logger.info(
+        "[capital] %s | initial=$%.0f | cum_pnl=%+.2f | capital: $%.2f → $%.2f (%+.1f%%)",
+        name, initial, cumulative_pnl, old_capital, new_capital, change_pct,
+    )
+    return report
+
+
+def run_capital_update_pass():
+    """Update our_capital for all active bots based on cumulative P&L."""
+    with get_session() as session:
+        bot_ids = [
+            b.id for b in session.execute(
+                select(BotRegistry).where(BotRegistry.active == True)
+            ).scalars().all()
+        ]
+    if not bot_ids:
+        return
+    logger.info("[capital] Running daily capital update for %d bot(s).", len(bot_ids))
+    for bot_id in bot_ids:
+        try:
+            recalibrate_capital(bot_id)
+        except Exception as e:
+            logger.exception("[capital] Error updating capital for %s: %s", bot_id, e)
+
+
 def run_calibration_pass():
     """Calibrate all active bots once."""
     with get_session() as session:
@@ -163,19 +245,34 @@ def run_calibration_pass():
 def run_calibrator_loop():
     """
     Runs forever as a daemon thread.
-    Calibrates all bots immediately on startup, then every 7 days.
+    - Capital update (our_capital from P&L): at startup + every 24 hours
+    - Wallet volume calibration (target_daily_capital): at startup + every 7 days
     """
-    logger.info("[calibrator] Weekly calibrator started (interval: 7 days).")
+    logger.info("[calibrator] Calibrator started — capital: daily, wallet volume: weekly.")
 
-    # Run once at startup so scaling ratio is fresh
+    # Run both passes immediately at startup
+    try:
+        run_capital_update_pass()
+    except Exception as e:
+        logger.exception("[calibrator] Startup capital update failed: %s", e)
+
     try:
         run_calibration_pass()
     except Exception as e:
-        logger.exception("[calibrator] Startup calibration failed: %s", e)
+        logger.exception("[calibrator] Startup wallet calibration failed: %s", e)
 
+    day = 0
     while True:
-        time.sleep(CALIBRATION_INTERVAL_SEC)
+        time.sleep(CAPITAL_UPDATE_INTERVAL_SEC)   # wake every 24h
+        day += 1
+
         try:
-            run_calibration_pass()
+            run_capital_update_pass()
         except Exception as e:
-            logger.exception("[calibrator] Calibration pass failed: %s", e)
+            logger.exception("[calibrator] Daily capital update failed: %s", e)
+
+        if day % 7 == 0:                          # every 7th day
+            try:
+                run_calibration_pass()
+            except Exception as e:
+                logger.exception("[calibrator] Weekly wallet calibration failed: %s", e)

@@ -47,6 +47,7 @@ def _migrate():
     """
     migrations = [
         "ALTER TABLE bot_registry ADD COLUMN our_capital REAL DEFAULT 100.0",
+        "ALTER TABLE bot_registry ADD COLUMN initial_capital REAL DEFAULT NULL",
     ]
     with engine.connect() as conn:
         for sql in migrations:

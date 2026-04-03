@@ -105,6 +105,21 @@ TOOLS = [
         },
     },
     {
+        "name": "get_capital_history",
+        "description": (
+            "Get daily capital update history for all bots. "
+            "Shows how our_capital has compounded (or shrunk) from P&L over time. "
+            "Use this in weekly briefings to report bankroll changes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Max entries to return (default 14)"},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "get_calibration_history",
         "description": (
             "Get weekly calibration reports for all bots. "
@@ -134,6 +149,7 @@ def _run_tool(name: str, inputs: dict) -> str:
         if name == "pause_bot":             return _tool_set_bot_paused(inputs["bot_name"], True)
         if name == "unpause_bot":           return _tool_set_bot_paused(inputs["bot_name"], False)
         if name == "set_emergency_stop":    return _tool_set_emergency_stop(inputs["enabled"])
+        if name == "get_capital_history":      return _tool_get_capital_history(inputs.get("limit", 14))
         if name == "get_calibration_history": return _tool_get_calibration_history(inputs.get("limit", 10))
         if name == "update_memory":         return apply_memory_update(inputs)
         return json.dumps({"error": f"Unknown tool: {name}"})
@@ -240,6 +256,25 @@ def _tool_get_skipped_trades(days: int, limit: int) -> str:
             "scaled_size_usd": round(t.scaled_size or 0, 2),
             "skip_reason": t.skip_reason, "market": t.question or t.market_id,
         } for t in trades])
+
+
+def _tool_get_capital_history(limit: int) -> str:
+    with get_session() as session:
+        events = session.execute(
+            select(HealthEvent)
+            .where(HealthEvent.event_type == "capital_recalibration")
+            .order_by(desc(HealthEvent.timestamp))
+            .limit(limit)
+        ).scalars().all()
+        results = []
+        for e in events:
+            try:
+                data = json.loads(e.details)
+            except (json.JSONDecodeError, TypeError):
+                data = {"raw": e.details}
+            data["logged_at"] = e.timestamp.isoformat() if e.timestamp else None
+            results.append(data)
+        return json.dumps(results)
 
 
 def _tool_get_calibration_history(limit: int) -> str:

@@ -130,6 +130,7 @@ def sync_bots_from_config():
                     poll_interval_sec=poll_interval,
                     target_daily_capital=capital,
                     our_capital=our_capital,
+                    initial_capital=our_capital,  # locked forever
                     total_trades=0,
                 )
                 session.add(new_bot)

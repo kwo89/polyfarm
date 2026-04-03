@@ -90,8 +90,9 @@ class BotRegistry(Base):
     target_address = Column(String, nullable=False, unique=True)
     wallet_address = Column(String, default="")     # our execution wallet (Phase 3)
     poll_interval_sec = Column(Integer, default=30)
-    our_capital = Column(Float, default=100.0)      # our starting capital for this bot (USD)
-    target_daily_capital = Column(Float, default=2000.0)  # target's estimated daily volume (auto-updated weekly)
+    our_capital = Column(Float, default=100.0)           # current capital — updated daily by P&L
+    initial_capital = Column(Float, default=None)        # locked starting capital — never changes
+    target_daily_capital = Column(Float, default=2000.0) # target's estimated daily volume (auto-updated weekly)
     paper_mode = Column(Boolean, default=True)
     active = Column(Boolean, default=True)
     paused = Column(Boolean, default=False)
