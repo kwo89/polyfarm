@@ -868,7 +868,11 @@ function renderBots(bots, allPaperTrades) {
         <div class="bot-meta-item"><span>${fmt(bs.volume)}</span>Volume</div>
         <div class="bot-meta-item"><span>${pnlStr}</span>P&amp;L</div>
         <div class="bot-meta-item"><span>${b.last_activity}</span>Last Active</div>
-        <div class="bot-meta-item">
+        <div class="bot-meta-item" style="display:flex;gap:6px;align-items:center">
+          <button onclick="event.stopPropagation();openChart('${b.id}','${b.name}')"
+            style="padding:3px 10px;border-radius:5px;font-size:11px;font-weight:600;background:rgba(59,130,246,.12);color:var(--blue);border:1px solid rgba(59,130,246,.3);cursor:pointer;white-space:nowrap">
+            Graph
+          </button>
           <a href="https://polymarket.com/profile/${b.target}" target="_blank" rel="noopener"
              onclick="event.stopPropagation()"
              style="display:inline-block;padding:3px 10px;border-radius:5px;font-size:11px;font-weight:600;background:rgba(99,102,241,.15);color:var(--accent);border:1px solid rgba(99,102,241,.3);text-decoration:none;white-space:nowrap">
@@ -1010,9 +1014,106 @@ document.getElementById('skipped-modal').addEventListener('click', function(e) {
   if (e.target === this) closeSkipped();
 });
 
+document.getElementById('chart-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeChart();
+});
+
+async function openChart(botId, name) {
+  document.getElementById('chart-modal').style.display = 'block';
+  document.getElementById('chart-title').textContent = name + ' — P&L Chart';
+  document.getElementById('chart-body').innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted)">Loading…</div>';
+  const d = await fetch('/api/bot_chart?bot_id=' + botId).then(r => r.json());
+  renderChart(d);
+}
+
+function closeChart() {
+  document.getElementById('chart-modal').style.display = 'none';
+}
+
+function renderChart(d) {
+  const body = document.getElementById('chart-body');
+  if (!d.daily || !d.daily.length) {
+    body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted)">No resolved trades yet.</div>';
+    return;
+  }
+  const days = d.daily;
+  const maxAbs   = Math.max(...days.map(x => Math.abs(x.cum_pnl)), 0.01);
+  const totalPnl = days[days.length - 1].cum_pnl;
+  const allTrades = days.reduce((s, x) => s + x.trades, 0);
+  const allWins   = days.reduce((s, x) => s + x.wins, 0);
+  const winRate   = allTrades ? (allWins / allTrades * 100).toFixed(1) : '—';
+  const pnlColor  = totalPnl >= 0 ? 'var(--green)' : 'var(--red)';
+  const sign      = totalPnl >= 0 ? '+' : '';
+  const resetNote = d.reset_at ? `<span style="color:var(--muted);font-size:11px">Since reset ${d.reset_at}</span>` : '';
+  const W = 700, H = 200, pad = { t: 16, r: 16, b: 28, l: 52 };
+  const cw = W - pad.l - pad.r, ch = H - pad.t - pad.b;
+  const n  = days.length;
+  const xScale = i => pad.l + (i / Math.max(n - 1, 1)) * cw;
+  const yScale = v => pad.t + ch / 2 - (v / maxAbs) * (ch / 2);
+  const pts = days.map((x, i) => `${xScale(i).toFixed(1)},${yScale(x.cum_pnl).toFixed(1)}`);
+  const linePath = 'M' + pts.join('L');
+  const fillPath = linePath + `L${xScale(n-1).toFixed(1)},${(pad.t+ch).toFixed(1)}L${xScale(0).toFixed(1)},${(pad.t+ch).toFixed(1)}Z`;
+  const yLabels = [-maxAbs, -maxAbs/2, 0, maxAbs/2, maxAbs].map(v => ({
+    y: yScale(v), label: (v >= 0 ? '+' : '') + v.toFixed(1)
+  }));
+  const xLabels = [0, Math.floor(n/2), n-1].filter((v,i,a)=>a.indexOf(v)===i).map(i => ({
+    x: xScale(i), label: days[i].date
+  }));
+  const BH = 60, bpad = { t: 8, b: 20 };
+  const bch = BH - bpad.t - bpad.b;
+  const maxBar = Math.max(...days.map(x => Math.abs(x.pnl)), 0.01);
+  const bars = days.map((x, i) => {
+    const bh = Math.max((Math.abs(x.pnl) / maxBar) * bch, 1);
+    const bx = xScale(i) - (n > 1 ? cw / (n-1) / 2 : 20);
+    const bw = Math.max(n > 1 ? cw / (n-1) * 0.6 : 40, 2);
+    const by = x.pnl >= 0 ? bpad.t + bch - bh : bpad.t + bch;
+    return `<rect x="${bx.toFixed(1)}" y="${(BH + by).toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" fill="${x.pnl >= 0 ? 'rgba(34,197,94,.5)' : 'rgba(239,68,68,.5)'}"/>`;
+  }).join('');
+  const dots = days.map((x, i) =>
+    `<circle cx="${xScale(i).toFixed(1)}" cy="${yScale(x.cum_pnl).toFixed(1)}" r="3" fill="${x.cum_pnl >= 0 ? 'var(--green)' : 'var(--red)'}" style="cursor:pointer"><title>${x.date}&#10;Daily: ${x.pnl >= 0?'+':''}$${x.pnl}&#10;Cumulative: ${x.cum_pnl >= 0?'+':''}$${x.cum_pnl}&#10;Trades: ${x.trades} (${x.wins} W)</title></circle>`
+  ).join('');
+  const totalH = H + BH + 16;
+  const svg = `<svg viewBox="0 0 ${W} ${totalH}" style="width:100%;max-width:${W}px;display:block;margin:0 auto">
+    <defs><linearGradient id="fill-grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${totalPnl>=0?'#22c55e':'#ef4444'}" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="${totalPnl>=0?'#22c55e':'#ef4444'}" stop-opacity="0"/>
+    </linearGradient></defs>
+    ${yLabels.map(l=>`<line x1="${pad.l}" y1="${l.y.toFixed(1)}" x2="${W-pad.r}" y2="${l.y.toFixed(1)}" stroke="var(--border)" stroke-width="1" ${l.label==='0.0'?'':'stroke-dasharray="3,3"'}/><text x="${(pad.l-6).toFixed(1)}" y="${(l.y+4).toFixed(1)}" text-anchor="end" fill="var(--muted)" font-size="10">${l.label==='0.0'?'$0':l.label}</text>`).join('')}
+    <path d="${fillPath}" fill="url(#fill-grad)"/>
+    <path d="${linePath}" fill="none" stroke="${totalPnl>=0?'var(--green)':'var(--red)'}" stroke-width="2" stroke-linejoin="round"/>
+    ${dots}
+    ${xLabels.map(l=>`<text x="${l.x.toFixed(1)}" y="${(H-4).toFixed(1)}" text-anchor="middle" fill="var(--muted)" font-size="10">${l.label}</text>`).join('')}
+    <text x="${pad.l}" y="${(H+6).toFixed(1)}" fill="var(--muted)" font-size="10">Daily P&amp;L</text>
+    ${bars}
+  </svg>`;
+  body.innerHTML = `
+    <div style="display:flex;gap:24px;padding:16px 20px 4px;flex-wrap:wrap">
+      <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Cumulative P&L</div>
+           <div style="font-size:22px;font-weight:700;color:${pnlColor}">${sign}$${Math.abs(totalPnl).toFixed(2)}</div></div>
+      <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Win Rate</div>
+           <div style="font-size:22px;font-weight:700">${winRate}${winRate!=='—'?'%':''}</div></div>
+      <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Resolved Trades</div>
+           <div style="font-size:22px;font-weight:700">${allTrades}</div></div>
+      <div style="margin-left:auto;display:flex;align-items:flex-end">${resetNote}</div>
+    </div>
+    <div style="padding:8px 12px">${svg}</div>
+    <div style="padding:4px 20px 8px;font-size:11px;color:var(--muted)">Hover dots for daily details</div>`;
+}
+
 loadData();
 setInterval(loadData, 30000);
 </script>
+
+<!-- Chart modal -->
+<div id="chart-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;overflow-y:auto">
+  <div style="max-width:780px;margin:40px auto;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);overflow:hidden">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid var(--border)">
+      <div id="chart-title" style="font-weight:700;font-size:15px"></div>
+      <button onclick="closeChart()" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:0 4px">✕</button>
+    </div>
+    <div id="chart-body"></div>
+  </div>
+</div>
 </body></html>"""
 
 
@@ -1248,17 +1349,6 @@ BOTS_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Chart modal -->
-  <div id="chart-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;overflow-y:auto">
-    <div style="max-width:780px;margin:40px auto;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);overflow:hidden">
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid var(--border)">
-        <div id="chart-title" style="font-weight:700;font-size:15px"></div>
-        <button onclick="closeChart()" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:0 4px">✕</button>
-      </div>
-      <div id="chart-body"></div>
-    </div>
-  </div>
-
   <!-- Registered Bots -->
   <div class="card" style="padding:0;overflow:hidden">
     <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
@@ -1308,7 +1398,7 @@ async function loadBots() {
               style="display:inline-flex;align-items:center;padding:4px 10px;border-radius:5px;font-size:11px;font-weight:600;background:rgba(99,102,241,.12);color:var(--accent);border:1px solid rgba(99,102,241,.3);text-decoration:none">View ↗</a>`
       : '<span style="color:var(--muted);font-size:11px">Deactivated</span>'
         + `<button class="btn-sm" style="background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.4)" onclick="deleteBot('${b.id}','${b.name}')">Delete</button>`;
-    const graphBtn = `<button class="btn-sm" style="background:rgba(59,130,246,.12);color:var(--blue);border:1px solid rgba(59,130,246,.3)" onclick="openChart('${b.id}','${b.name}')">Graph</button>`;
+    const graphBtn = '';
 
     const bucketsCell = b.buckets_ready
       ? `<div style="font-size:11px;line-height:1.7;font-family:monospace">
@@ -1453,126 +1543,6 @@ async function resetBot(botId, name) {
   else { alert(res.message); loadBots(); }
 }
 
-// ── Chart modal ───────────────────────────────────────────────────────────────
-async function openChart(botId, name) {
-  document.getElementById('chart-modal').style.display = 'block';
-  document.getElementById('chart-title').textContent = name + ' — P&L Chart';
-  document.getElementById('chart-body').innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted)">Loading…</div>';
-  const d = await fetch('/api/bot_chart?bot_id=' + botId).then(r => r.json());
-  renderChart(d);
-}
-
-function closeChart() {
-  document.getElementById('chart-modal').style.display = 'none';
-}
-
-function renderChart(d) {
-  const body = document.getElementById('chart-body');
-  if (!d.daily || !d.daily.length) {
-    body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted)">No resolved trades yet.</div>';
-    return;
-  }
-
-  const days      = d.daily;
-  const maxAbs    = Math.max(...days.map(x => Math.abs(x.cum_pnl)), 0.01);
-  const totalPnl  = days[days.length - 1].cum_pnl;
-  const allTrades = days.reduce((s, x) => s + x.trades, 0);
-  const allWins   = days.reduce((s, x) => s + x.wins, 0);
-  const winRate   = allTrades ? (allWins / allTrades * 100).toFixed(1) : '—';
-  const pnlColor  = totalPnl >= 0 ? 'var(--green)' : 'var(--red)';
-  const sign      = totalPnl >= 0 ? '+' : '';
-  const resetNote = d.reset_at ? `<span style="color:var(--muted);font-size:11px">Since reset ${d.reset_at}</span>` : '';
-
-  // SVG line chart
-  const W = 700, H = 200, pad = { t: 16, r: 16, b: 28, l: 52 };
-  const cw = W - pad.l - pad.r, ch = H - pad.t - pad.b;
-  const n  = days.length;
-
-  const xScale = i => pad.l + (i / Math.max(n - 1, 1)) * cw;
-  const yScale = v => pad.t + ch / 2 - (v / maxAbs) * (ch / 2);
-
-  // Build path
-  const pts = days.map((x, i) => `${xScale(i).toFixed(1)},${yScale(x.cum_pnl).toFixed(1)}`);
-  const linePath = 'M' + pts.join('L');
-  const fillPath = linePath + `L${xScale(n-1).toFixed(1)},${(pad.t+ch).toFixed(1)}L${xScale(0).toFixed(1)},${(pad.t+ch).toFixed(1)}Z`;
-
-  // Y-axis labels
-  const yLabels = [-maxAbs, -maxAbs/2, 0, maxAbs/2, maxAbs].map(v => ({
-    y: yScale(v), label: (v >= 0 ? '+' : '') + v.toFixed(1)
-  }));
-
-  // X-axis labels (first, middle, last)
-  const xLabels = [0, Math.floor(n/2), n-1].filter((v,i,a)=>a.indexOf(v)===i).map(i => ({
-    x: xScale(i), label: days[i].date
-  }));
-
-  // Bar chart for daily P&L (small bars below line chart)
-  const BH = 60, bpad = { t: 8, b: 20 };
-  const bch = BH - bpad.t - bpad.b;
-  const maxBar = Math.max(...days.map(x => Math.abs(x.pnl)), 0.01);
-  const bars = days.map((x, i) => {
-    const bh = Math.max((Math.abs(x.pnl) / maxBar) * bch, 1);
-    const bx = xScale(i) - (n > 1 ? cw / (n-1) / 2 : 20);
-    const bw = Math.max(n > 1 ? cw / (n-1) * 0.6 : 40, 2);
-    const by = x.pnl >= 0 ? bpad.t + bch - bh : bpad.t + bch;
-    return `<rect x="${bx.toFixed(1)}" y="${(BH + by).toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}"
-              fill="${x.pnl >= 0 ? 'rgba(34,197,94,.5)' : 'rgba(239,68,68,.5)'}"/>`;
-  }).join('');
-
-  // Tooltip dots
-  const dots = days.map((x, i) =>
-    `<circle cx="${xScale(i).toFixed(1)}" cy="${yScale(x.cum_pnl).toFixed(1)}" r="3"
-       fill="${x.cum_pnl >= 0 ? 'var(--green)' : 'var(--red)'}"
-       style="cursor:pointer">
-       <title>${x.date}&#10;Daily: ${x.pnl >= 0?'+':''}$${x.pnl}&#10;Cumulative: ${x.cum_pnl >= 0?'+':''}$${x.cum_pnl}&#10;Trades: ${x.trades} (${x.wins} W)</title>
-     </circle>`
-  ).join('');
-
-  const totalH = H + BH + 16;
-  const svg = `
-  <svg viewBox="0 0 ${W} ${totalH}" style="width:100%;max-width:${W}px;display:block;margin:0 auto">
-    <defs>
-      <linearGradient id="fill-grad" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="${totalPnl>=0?'#22c55e':'#ef4444'}" stop-opacity="0.25"/>
-        <stop offset="100%" stop-color="${totalPnl>=0?'#22c55e':'#ef4444'}" stop-opacity="0"/>
-      </linearGradient>
-    </defs>
-    <!-- grid lines -->
-    ${yLabels.map(l=>`
-      <line x1="${pad.l}" y1="${l.y.toFixed(1)}" x2="${W-pad.r}" y2="${l.y.toFixed(1)}"
-            stroke="var(--border)" stroke-width="1" ${l.label==='0.0'?'':'stroke-dasharray="3,3"'}/>
-      <text x="${(pad.l-6).toFixed(1)}" y="${(l.y+4).toFixed(1)}" text-anchor="end"
-            fill="var(--muted)" font-size="10">${l.label==='0.0'?'$0':l.label}</text>`).join('')}
-    <!-- fill area -->
-    <path d="${fillPath}" fill="url(#fill-grad)"/>
-    <!-- line -->
-    <path d="${linePath}" fill="none" stroke="${totalPnl>=0?'var(--green)':'var(--red)'}" stroke-width="2" stroke-linejoin="round"/>
-    <!-- dots -->
-    ${dots}
-    <!-- x labels -->
-    ${xLabels.map(l=>`<text x="${l.x.toFixed(1)}" y="${(H-4).toFixed(1)}" text-anchor="middle" fill="var(--muted)" font-size="10">${l.label}</text>`).join('')}
-    <!-- daily bars -->
-    <text x="${pad.l}" y="${(H+6).toFixed(1)}" fill="var(--muted)" font-size="10">Daily P&amp;L</text>
-    ${bars}
-  </svg>`;
-
-  body.innerHTML = `
-    <div style="display:flex;gap:24px;padding:16px 20px 4px;flex-wrap:wrap">
-      <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Cumulative P&L</div>
-           <div style="font-size:22px;font-weight:700;color:${pnlColor}">${sign}$${Math.abs(totalPnl).toFixed(2)}</div></div>
-      <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Win Rate</div>
-           <div style="font-size:22px;font-weight:700">${winRate}${winRate!=='—'?'%':''}</div></div>
-      <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Resolved Trades</div>
-           <div style="font-size:22px;font-weight:700">${allTrades}</div></div>
-      <div style="margin-left:auto;display:flex;align-items:flex-end">${resetNote}</div>
-    </div>
-    <div style="padding:8px 12px">${svg}</div>
-    <div style="padding:4px 20px 8px;font-size:11px;color:var(--muted)">Hover dots for daily details</div>`;
-}
-
-document.getElementById('chart-modal').addEventListener('click', function(e) {
-  if (e.target === this) closeChart();
-});
 
 // Allow Enter key to submit form
 document.addEventListener('keydown', e => {
