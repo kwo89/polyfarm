@@ -419,7 +419,7 @@ def get_all_bots() -> list:
 
         # Aggregate per bot, respecting reset_at
         from collections import defaultdict
-        agg = defaultdict(lambda: {"realized_pnl": 0.0, "pending_count": 0, "resolved_count": 0})
+        agg = defaultdict(lambda: {"realized_pnl": 0.0, "locked": 0.0, "pending_count": 0, "resolved_count": 0})
         for row in all_trades:
             reset = reset_at_map.get(row.bot_id)
             if reset and row.created_at and row.created_at < reset:
@@ -429,6 +429,7 @@ def get_all_bots() -> list:
                 a["realized_pnl"] += row.hypothetical_pnl or 0.0
                 a["resolved_count"] += 1
             else:
+                a["locked"] += row.hypothetical_value or 0.0
                 a["pending_count"] += 1
 
         result = []
@@ -436,6 +437,7 @@ def get_all_bots() -> list:
             a       = agg.get(b.id, {})
             initial = b.initial_capital or b.our_capital or 0
             realized = round(a.get("realized_pnl", 0.0), 2)
+            locked   = round(a.get("locked", 0.0), 2)
             resolved = a.get("resolved_count", 0)
             pending  = a.get("pending_count", 0)
             # Capital = starting capital + resolved P&L (no locked subtraction —
@@ -448,6 +450,7 @@ def get_all_bots() -> list:
                 "our_capital": capital,
                 "initial_capital": initial,
                 "realized_pnl": realized,
+                "locked_capital": locked,
                 "resolved_count": resolved,
                 "pending_count": pending,
                 "target_daily_capital": b.target_daily_capital or 0,
@@ -935,12 +938,12 @@ function renderBots(bots, allPaperTrades) {
       ? `<span style="color:${bs.winRate >= 50 ? 'var(--green)' : 'var(--red)'}">${fmtPct(bs.winRate)}</span>`
       : '<span style="color:var(--muted)">—</span>';
     return `<div class="bot-row${selectedClass}" onclick="selectBot('${b.name}')">
+      <span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:4px;background:rgba(99,102,241,.1);color:var(--accent);white-space:nowrap;flex-shrink:0">${b.paper_mode ? 'Paper' : 'Live'}</span>
       <div class="bot-indicator ${st}"></div>
       <div style="min-width:0">
         <div style="display:flex;align-items:center;gap:6px">
           <div class="bot-name">${b.name}</div>
-          <span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:4px;background:rgba(255,255,255,.06);color:${stColor}">${stLabel}</span>
-          <span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:4px;background:rgba(99,102,241,.1);color:var(--accent)">${b.paper_mode ? 'Paper' : 'Live'}</span>
+          ${st !== 'active' ? `<span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:4px;background:rgba(255,255,255,.06);color:${stColor}">${stLabel}</span>` : ''}
         </div>
         <div class="bot-addr">${b.target}</div>
       </div>
@@ -1493,8 +1496,9 @@ async function loadBots() {
           p&l <span style="color:${b.realized_pnl >= 0 ? 'var(--green)' : 'var(--red)'}">${b.realized_pnl >= 0 ? '+' : ''}$${b.realized_pnl.toFixed(2)}</span>
         </div>
         <div style="font-size:10px;color:var(--muted)">
-          <span style="color:var(--green)">${b.resolved_count} resolved</span> /
-          <span style="color:var(--yellow)">${b.pending_count} pending</span>
+          🔒 $${b.locked_capital.toFixed(2)} in open bets &nbsp;·&nbsp;
+          <span style="color:var(--green)">${b.resolved_count}✓</span>
+          <span style="color:var(--yellow)">${b.pending_count}⏳</span>
         </div>
       </td>
       <td style="color:var(--muted)">$${b.target_daily_capital.toFixed(0)}/day</td>
