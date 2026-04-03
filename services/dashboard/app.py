@@ -15,7 +15,21 @@ import json
 import os
 import sys
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+try:
+    from zoneinfo import ZoneInfo
+    _LONDON = ZoneInfo("Europe/London")
+except ImportError:
+    _LONDON = None   # Python < 3.9 fallback — stays UTC
+
+def _to_london(dt: datetime) -> str:
+    """Format a naive UTC datetime as London time (BST/GMT aware)."""
+    if dt is None:
+        return "Never"
+    if _LONDON:
+        aware = dt.replace(tzinfo=timezone.utc).astimezone(_LONDON)
+        return aware.strftime("%Y-%m-%d %H:%M %Z")
+    return dt.strftime("%Y-%m-%d %H:%M UTC")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -107,7 +121,7 @@ def get_dashboard_data(days: int = 7) -> dict:
                 "id": b.id, "name": b.name, "target": b.target_address,
                 "active": b.active, "paused": b.paused, "paper_mode": b.paper_mode,
                 "total_trades": b.total_trades or 0, "capital": b.target_daily_capital or 0,
-                "last_activity": b.last_activity_at.strftime("%Y-%m-%d %H:%M UTC") if b.last_activity_at else "Never",
+                "last_activity": _to_london(b.last_activity_at) if b.last_activity_at else "Never",
                 "reset_at": b.reset_at.isoformat() if b.reset_at else None,
             }
             for b in bots_raw
@@ -133,7 +147,7 @@ def get_dashboard_data(days: int = 7) -> dict:
 
         paper_trades = [
             {
-                "time": t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else "—",
+                "time": _to_london(t.created_at) if t.created_at else "—",
                 "bot": bot_names.get(t.bot_id, t.bot_id[:8]),
                 "side": t.side,
                 "outcome": t.outcome,
@@ -204,7 +218,7 @@ def get_dashboard_data(days: int = 7) -> dict:
         emergency_stop = estop_row.value == "1" if estop_row else False
 
     return {
-        "generated": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "generated": _to_london(datetime.utcnow()),
         "days": days, "trading_mode": trading_mode,
         "emergency_stop": emergency_stop,
         "bots": bots,
@@ -426,7 +440,7 @@ def get_all_bots() -> list:
                 "pending_count": pending,
                 "target_daily_capital": b.target_daily_capital or 0,
                 "total_trades": b.total_trades or 0,
-                "last_activity": b.last_activity_at.strftime("%Y-%m-%d %H:%M UTC") if b.last_activity_at else "Never",
+                "last_activity": _to_london(b.last_activity_at) if b.last_activity_at else "Never",
                 "buckets": [b.bucket_t1, b.bucket_t2, b.bucket_t3, b.bucket_t4],
                 "buckets_ready": all(x is not None for x in [b.bucket_t1, b.bucket_t2, b.bucket_t3, b.bucket_t4]),
                 "reset_at": b.reset_at.isoformat() if b.reset_at else None,
@@ -740,7 +754,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="section">
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Time (UTC)</th><th>Bot</th><th>Side</th><th>Bet</th><th>Winner</th><th>Target $</th><th>Our $</th><th>Price</th><th>Status</th><th>P&L</th><th>Market</th></tr></thead>
+        <thead><tr><th>Time (London)</th><th>Bot</th><th>Side</th><th>Bet</th><th>Winner</th><th>Target $</th><th>Our $</th><th>Price</th><th>Status</th><th>P&L</th><th>Market</th></tr></thead>
         <tbody id="trades-tbody"><tr><td colspan="11" style="text-align:center;padding:30px;color:var(--muted)">Loading…</td></tr></tbody>
       </table>
     </div>
@@ -898,31 +912,39 @@ function renderBots(bots, allPaperTrades) {
 
   const rows = bots.map(b => {
     const st = !b.active ? 'inactive' : b.paused ? 'paused' : 'active';
+    const stLabel = !b.active ? 'Inactive' : b.paused ? 'Paused' : 'Running';
+    const stColor = !b.active ? 'var(--muted)' : b.paused ? 'var(--yellow)' : 'var(--green)';
     const bs = botStats[b.name];
     const selectedClass = selectedBot === b.name ? ' selected' : '';
     const pnlStr = bs.resolved > 0
-      ? `<span style="color:${bs.pnl >= 0 ? 'var(--green)' : 'var(--red)'}; font-weight:600">${bs.pnl >= 0 ? '+' : ''}${fmt(bs.pnl)}</span>`
+      ? `<span style="color:${bs.pnl >= 0 ? 'var(--green)' : 'var(--red)'};font-weight:600">${bs.pnl >= 0 ? '+' : ''}${fmt(bs.pnl)}</span>`
+      : '<span style="color:var(--muted)">—</span>';
+    const wrStr = bs.winRate != null
+      ? `<span style="color:${bs.winRate >= 50 ? 'var(--green)' : 'var(--red)'}">${fmtPct(bs.winRate)}</span>`
       : '<span style="color:var(--muted)">—</span>';
     return `<div class="bot-row${selectedClass}" onclick="selectBot('${b.name}')">
       <div class="bot-indicator ${st}"></div>
-      <div><div class="bot-name">${b.name}</div><div class="bot-addr">${b.target}</div></div>
+      <div style="min-width:0">
+        <div style="display:flex;align-items:center;gap:6px">
+          <div class="bot-name">${b.name}</div>
+          <span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:4px;background:rgba(255,255,255,.06);color:${stColor}">${stLabel}</span>
+          <span style="font-size:10px;font-weight:600;padding:1px 6px;border-radius:4px;background:rgba(99,102,241,.1);color:var(--accent)">${b.paper_mode ? 'Paper' : 'Live'}</span>
+        </div>
+        <div class="bot-addr">${b.target}</div>
+      </div>
       <div class="bot-meta">
-        <div class="bot-meta-item"><span>${!b.active ? 'Inactive' : b.paused ? 'Paused' : 'Running'}</span>Status</div>
-        <div class="bot-meta-item"><span>${b.paper_mode ? 'Paper' : 'Live'}</span>Mode</div>
         <div class="bot-meta-item"><span>${bs.paper}</span>Trades</div>
+        <div class="bot-meta-item"><span>${bs.resolved} / ${bs.pending}</span>Resolved / Open</div>
         <div class="bot-meta-item"><span>${fmt(bs.volume)}</span>Volume</div>
         <div class="bot-meta-item"><span>${pnlStr}</span>P&amp;L</div>
-        <div class="bot-meta-item"><span>${b.last_activity}</span>Last Active</div>
+        <div class="bot-meta-item"><span>${wrStr}</span>Win Rate</div>
+        <div class="bot-meta-item"><span style="font-size:11px">${b.last_activity}</span>Last Active</div>
         <div class="bot-meta-item" style="display:flex;gap:6px;align-items:center">
           <button onclick="event.stopPropagation();openChart('${b.id}','${b.name}')"
-            style="padding:3px 10px;border-radius:5px;font-size:11px;font-weight:600;background:rgba(59,130,246,.12);color:var(--blue);border:1px solid rgba(59,130,246,.3);cursor:pointer;white-space:nowrap">
-            Graph
-          </button>
+            style="padding:3px 10px;border-radius:5px;font-size:11px;font-weight:600;background:rgba(59,130,246,.12);color:var(--blue);border:1px solid rgba(59,130,246,.3);cursor:pointer;white-space:nowrap">Graph</button>
           <a href="https://polymarket.com/profile/${b.target}" target="_blank" rel="noopener"
              onclick="event.stopPropagation()"
-             style="display:inline-block;padding:3px 10px;border-radius:5px;font-size:11px;font-weight:600;background:rgba(99,102,241,.15);color:var(--accent);border:1px solid rgba(99,102,241,.3);text-decoration:none;white-space:nowrap">
-            View ↗
-          </a>
+             style="display:inline-block;padding:3px 10px;border-radius:5px;font-size:11px;font-weight:600;background:rgba(99,102,241,.15);color:var(--accent);border:1px solid rgba(99,102,241,.3);text-decoration:none;white-space:nowrap">View ↗</a>
         </div>
       </div>
     </div>`;
@@ -937,12 +959,11 @@ function renderBots(bots, allPaperTrades) {
     <div style="width:8px;height:8px;flex-shrink:0"></div>
     <div><div class="bot-name">Portfolio Total</div><div class="bot-addr">${bots.length} bot(s) combined</div></div>
     <div class="bot-meta">
-      <div class="bot-meta-item"><span style="color:var(--text)">—</span>Status</div>
-      <div class="bot-meta-item"><span style="color:var(--text)">—</span>Mode</div>
       <div class="bot-meta-item"><span style="color:var(--text);font-weight:700">${allStats.paper}</span>Trades</div>
+      <div class="bot-meta-item"><span style="color:var(--text);font-weight:700">${allStats.resolved} / ${allStats.pending}</span>Resolved / Open</div>
       <div class="bot-meta-item"><span style="color:var(--text);font-weight:700">${fmt(allStats.volume)}</span>Volume</div>
       <div class="bot-meta-item"><span>${sumPnlStr}</span>P&amp;L</div>
-      <div class="bot-meta-item"><span style="color:var(--text)">${allStats.winRate != null ? fmtPct(allStats.winRate) : '—'}</span>Win Rate</div>
+      <div class="bot-meta-item"><span style="color:var(--text);font-weight:700">${allStats.winRate != null ? fmtPct(allStats.winRate) : '—'}</span>Win Rate</div>
     </div>
   </div>`;
 
