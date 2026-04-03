@@ -52,6 +52,7 @@ def _migrate():
         "ALTER TABLE bot_registry ADD COLUMN bucket_t2 REAL DEFAULT NULL",
         "ALTER TABLE bot_registry ADD COLUMN bucket_t3 REAL DEFAULT NULL",
         "ALTER TABLE bot_registry ADD COLUMN bucket_t4 REAL DEFAULT NULL",
+        "ALTER TABLE bot_registry ADD COLUMN reset_at TEXT DEFAULT NULL",
     ]
     with engine.connect() as conn:
         for sql in migrations:

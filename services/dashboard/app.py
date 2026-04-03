@@ -108,6 +108,7 @@ def get_dashboard_data(days: int = 7) -> dict:
                 "active": b.active, "paused": b.paused, "paper_mode": b.paper_mode,
                 "total_trades": b.total_trades or 0, "capital": b.target_daily_capital or 0,
                 "last_activity": b.last_activity_at.strftime("%Y-%m-%d %H:%M UTC") if b.last_activity_at else "Never",
+                "reset_at": b.reset_at.isoformat() if b.reset_at else None,
             }
             for b in bots_raw
         ]
@@ -288,6 +289,24 @@ def api_update_bot(bot_id: str, action: str, new_name: str = "", amount: float =
                 return {"error": f"Name '{new_name}' is already taken."}
             bot.name = new_name
             return {"success": True, "message": f"Bot renamed to '{new_name}'."}
+        elif action == "reset":
+            now = datetime.utcnow()
+            old_capital = bot.our_capital or 0
+            bot.reset_at   = now
+            bot.our_capital = bot.initial_capital or old_capital  # restore starting capital
+            from core.models import HealthEvent
+            session.add(HealthEvent(
+                component=f"reset:{name}",
+                event_type="bot_reset",
+                details=json.dumps({
+                    "bot_name":    name,
+                    "reset_at":    now.isoformat(),
+                    "capital_was": old_capital,
+                    "capital_now": bot.our_capital,
+                    "note":        "Bot reset by user. P&L now counts from this point forward.",
+                })
+            ))
+            return {"success": True, "message": f"Bot '{name}' reset. P&L tracking starts fresh from now. Capital restored to ${bot.our_capital:.2f}."}
         elif action == "deposit":
             if amount <= 0:
                 return {"error": "Deposit amount must be greater than $0."}
@@ -327,14 +346,70 @@ def get_all_bots() -> list:
                 "our_capital": b.our_capital or 0,
                 "initial_capital": b.initial_capital or b.our_capital or 0,
                 "target_daily_capital": b.target_daily_capital or 0,
-                "ratio_pct": round((b.our_capital or 0) / (b.target_daily_capital or 1) * 100, 2),
                 "total_trades": b.total_trades or 0,
                 "last_activity": b.last_activity_at.strftime("%Y-%m-%d %H:%M UTC") if b.last_activity_at else "Never",
                 "buckets": [b.bucket_t1, b.bucket_t2, b.bucket_t3, b.bucket_t4],
                 "buckets_ready": all(x is not None for x in [b.bucket_t1, b.bucket_t2, b.bucket_t3, b.bucket_t4]),
+                "reset_at": b.reset_at.isoformat() if b.reset_at else None,
             }
             for b in bots
         ]
+
+
+def get_bot_chart_data(bot_id: str) -> dict:
+    """Returns daily P&L time-series for a bot, respecting reset_at."""
+    with get_session() as session:
+        bot = session.get(BotRegistry, bot_id)
+        if not bot:
+            return {"error": "Bot not found"}
+        name     = bot.name
+        reset_at_dt = bot.reset_at
+        reset_at    = reset_at_dt.strftime("%Y-%m-%d") if reset_at_dt else None
+
+        # Daily P&L rows
+        pnl_query = select(DailyPnl).where(DailyPnl.bot_id == bot_id)
+        if reset_at:
+            pnl_query = pnl_query.where(DailyPnl.date >= reset_at)
+        pnl_rows = {r.date: r for r in session.execute(pnl_query.order_by(DailyPnl.date)).scalars().all()}
+
+        # Resolved trades for win/loss per day
+        trade_query = select(PaperTrade).where(
+            PaperTrade.bot_id == bot_id,
+            PaperTrade.market_resolved == True,
+        )
+        if reset_at_dt:
+            trade_query = trade_query.where(PaperTrade.created_at >= reset_at_dt)
+        trades = session.execute(trade_query).scalars().all()
+
+        wins_by_day = {}
+        total_by_day = {}
+        for t in trades:
+            day = t.created_at.strftime("%Y-%m-%d") if t.created_at else None
+            if not day:
+                continue
+            total_by_day[day] = total_by_day.get(day, 0) + 1
+            if (t.hypothetical_pnl or 0) > 0:
+                wins_by_day[day] = wins_by_day.get(day, 0) + 1
+
+        dates = sorted(set(list(pnl_rows.keys()) + list(total_by_day.keys())))
+        daily = []
+        cum   = 0.0
+        for d in dates:
+            row    = pnl_rows.get(d)
+            pnl    = round(row.realized_pnl if row else 0, 2)
+            cum    = round(cum + pnl, 2)
+            t_cnt  = total_by_day.get(d, 0)
+            w_cnt  = wins_by_day.get(d, 0)
+            daily.append({
+                "date":     d,
+                "pnl":      pnl,
+                "cum_pnl":  cum,
+                "trades":   t_cnt,
+                "wins":     w_cnt,
+                "win_rate": round(w_cnt / t_cnt * 100, 1) if t_cnt else None,
+            })
+
+    return {"bot_id": bot_id, "bot_name": name, "reset_at": reset_at, "daily": daily}
 
 
 # ── HTTP handler ──────────────────────────────────────────────────────────────
@@ -371,6 +446,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif parsed.path == "/api/bots":
             self._json({"bots": get_all_bots()})
+
+        elif parsed.path == "/api/bot_chart":
+            qs = parse_qs(parsed.query)
+            bot_id = qs.get("bot_id", [""])[0]
+            self._json(get_bot_chart_data(bot_id))
 
         elif parsed.path in ("/", "/index.html"):
             self._html(DASHBOARD_HTML)
@@ -1118,6 +1198,17 @@ BOTS_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- Chart modal -->
+  <div id="chart-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;overflow-y:auto">
+    <div style="max-width:780px;margin:40px auto;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);overflow:hidden">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid var(--border)">
+        <div id="chart-title" style="font-weight:700;font-size:15px"></div>
+        <button onclick="closeChart()" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:0 4px">✕</button>
+      </div>
+      <div id="chart-body"></div>
+    </div>
+  </div>
+
   <!-- Registered Bots -->
   <div class="card" style="padding:0;overflow:hidden">
     <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
@@ -1128,7 +1219,7 @@ BOTS_HTML = """<!DOCTYPE html>
       <table>
         <thead><tr>
           <th>St.</th><th>Name</th><th>Wallet</th>
-          <th>Capital</th><th>Target Daily Vol</th><th>Ratio</th>
+          <th>Capital</th><th>Target Daily Vol</th>
           <th>Sizing Buckets</th>
           <th>Trades</th><th>Actions</th>
         </tr></thead>
@@ -1161,15 +1252,21 @@ async function loadBots() {
           : `<button class="btn-sm btn-pause"   onclick="updateBot('${b.id}','pause')">Pause</button>`)
         + `<button class="btn-sm" style="background:rgba(99,102,241,.12);color:var(--accent);border:1px solid rgba(99,102,241,.3)" onclick="renameBot('${b.id}','${b.name}')">Rename</button>`
         + `<button class="btn-sm" style="background:rgba(34,197,94,.1);color:var(--green);border:1px solid rgba(34,197,94,.3)" onclick="depositCapital('${b.id}','${b.name}',${b.our_capital})">+ Capital</button>`
+        + `<button class="btn-sm" style="background:rgba(239,68,68,.08);color:var(--red);border:1px solid rgba(239,68,68,.25)" onclick="resetBot('${b.id}','${b.name}')">Reset</button>`
         + `<button class="btn-sm btn-deactivate" onclick="confirmDeactivate('${b.id}','${b.name}')">Deactivate</button>`
         + `<a href="https://polymarket.com/profile/${b.target}" target="_blank" rel="noopener"
               style="display:inline-flex;align-items:center;padding:4px 10px;border-radius:5px;font-size:11px;font-weight:600;background:rgba(99,102,241,.12);color:var(--accent);border:1px solid rgba(99,102,241,.3);text-decoration:none">View ↗</a>`
       : '<span style="color:var(--muted);font-size:11px">Deactivated</span>';
+    const graphBtn = `<button class="btn-sm" style="background:rgba(59,130,246,.12);color:var(--blue);border:1px solid rgba(59,130,246,.3)" onclick="openChart('${b.id}','${b.name}')">Graph</button>`;
 
     const bucketsCell = b.buckets_ready
-      ? `<span style="font-size:11px;color:var(--muted)" title="Bucket thresholds (20/40/60/80th pct of target trades)">
-           $0–$${b.buckets[0]} · $${b.buckets[1]} · $${b.buckets[2]} · $${b.buckets[3]}+
-         </span>`
+      ? `<div style="font-size:11px;line-height:1.7;font-family:monospace">
+           <div><span style="color:var(--muted)">1%</span> <span style="color:var(--text)">$0 – $${b.buckets[0]}</span></div>
+           <div><span style="color:var(--muted)">2%</span> <span style="color:var(--text)">$${b.buckets[0]} – $${b.buckets[1]}</span></div>
+           <div><span style="color:var(--muted)">3%</span> <span style="color:var(--text)">$${b.buckets[1]} – $${b.buckets[2]}</span></div>
+           <div><span style="color:var(--muted)">4%</span> <span style="color:var(--text)">$${b.buckets[2]} – $${b.buckets[3]}</span></div>
+           <div><span style="color:var(--muted)">5%</span> <span style="color:var(--text)">$${b.buckets[3]}+</span></div>
+         </div>`
       : `<span style="font-size:11px;color:var(--yellow)">Calibrating…</span>`;
 
     return `<tr>
@@ -1183,7 +1280,7 @@ async function loadBots() {
       <td style="font-weight:600;color:var(--blue)">${ratio}</td>
       <td>${bucketsCell}</td>
       <td>${b.total_trades}</td>
-      <td><div class="actions">${actions}</div></td>
+      <td><div class="actions">${actions}${graphBtn}</div></td>
     </tr>`;
   }).join('');
 }
@@ -1268,6 +1365,138 @@ async function renameBot(botId, currentName) {
   if (res.error) alert(res.error);
   else loadBots();
 }
+
+async function resetBot(botId, name) {
+  if (!confirm(`Reset "${name}"?\n\nThis clears the P&L start point and restores original capital.\nAll historical trade data is kept — just excluded from current P&L view.`)) return;
+  const res = await fetch('/api/update_bot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bot_id: botId, action: 'reset' }),
+  }).then(r => r.json());
+  if (res.error) alert(res.error);
+  else { alert(res.message); loadBots(); }
+}
+
+// ── Chart modal ───────────────────────────────────────────────────────────────
+async function openChart(botId, name) {
+  document.getElementById('chart-modal').style.display = 'block';
+  document.getElementById('chart-title').textContent = name + ' — P&L Chart';
+  document.getElementById('chart-body').innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted)">Loading…</div>';
+  const d = await fetch('/api/bot_chart?bot_id=' + botId).then(r => r.json());
+  renderChart(d);
+}
+
+function closeChart() {
+  document.getElementById('chart-modal').style.display = 'none';
+}
+
+function renderChart(d) {
+  const body = document.getElementById('chart-body');
+  if (!d.daily || !d.daily.length) {
+    body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted)">No resolved trades yet.</div>';
+    return;
+  }
+
+  const days      = d.daily;
+  const maxAbs    = Math.max(...days.map(x => Math.abs(x.cum_pnl)), 0.01);
+  const totalPnl  = days[days.length - 1].cum_pnl;
+  const allTrades = days.reduce((s, x) => s + x.trades, 0);
+  const allWins   = days.reduce((s, x) => s + x.wins, 0);
+  const winRate   = allTrades ? (allWins / allTrades * 100).toFixed(1) : '—';
+  const pnlColor  = totalPnl >= 0 ? 'var(--green)' : 'var(--red)';
+  const sign      = totalPnl >= 0 ? '+' : '';
+  const resetNote = d.reset_at ? `<span style="color:var(--muted);font-size:11px">Since reset ${d.reset_at}</span>` : '';
+
+  // SVG line chart
+  const W = 700, H = 200, pad = { t: 16, r: 16, b: 28, l: 52 };
+  const cw = W - pad.l - pad.r, ch = H - pad.t - pad.b;
+  const n  = days.length;
+
+  const xScale = i => pad.l + (i / Math.max(n - 1, 1)) * cw;
+  const yScale = v => pad.t + ch / 2 - (v / maxAbs) * (ch / 2);
+
+  // Build path
+  const pts = days.map((x, i) => `${xScale(i).toFixed(1)},${yScale(x.cum_pnl).toFixed(1)}`);
+  const linePath = 'M' + pts.join('L');
+  const fillPath = linePath + `L${xScale(n-1).toFixed(1)},${(pad.t+ch).toFixed(1)}L${xScale(0).toFixed(1)},${(pad.t+ch).toFixed(1)}Z`;
+
+  // Y-axis labels
+  const yLabels = [-maxAbs, -maxAbs/2, 0, maxAbs/2, maxAbs].map(v => ({
+    y: yScale(v), label: (v >= 0 ? '+' : '') + v.toFixed(1)
+  }));
+
+  // X-axis labels (first, middle, last)
+  const xLabels = [0, Math.floor(n/2), n-1].filter((v,i,a)=>a.indexOf(v)===i).map(i => ({
+    x: xScale(i), label: days[i].date
+  }));
+
+  // Bar chart for daily P&L (small bars below line chart)
+  const BH = 60, bpad = { t: 8, b: 20 };
+  const bch = BH - bpad.t - bpad.b;
+  const maxBar = Math.max(...days.map(x => Math.abs(x.pnl)), 0.01);
+  const bars = days.map((x, i) => {
+    const bh = Math.max((Math.abs(x.pnl) / maxBar) * bch, 1);
+    const bx = xScale(i) - (n > 1 ? cw / (n-1) / 2 : 20);
+    const bw = Math.max(n > 1 ? cw / (n-1) * 0.6 : 40, 2);
+    const by = x.pnl >= 0 ? bpad.t + bch - bh : bpad.t + bch;
+    return `<rect x="${bx.toFixed(1)}" y="${(BH + by).toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}"
+              fill="${x.pnl >= 0 ? 'rgba(34,197,94,.5)' : 'rgba(239,68,68,.5)'}"/>`;
+  }).join('');
+
+  // Tooltip dots
+  const dots = days.map((x, i) =>
+    `<circle cx="${xScale(i).toFixed(1)}" cy="${yScale(x.cum_pnl).toFixed(1)}" r="3"
+       fill="${x.cum_pnl >= 0 ? 'var(--green)' : 'var(--red)'}"
+       style="cursor:pointer">
+       <title>${x.date}&#10;Daily: ${x.pnl >= 0?'+':''}$${x.pnl}&#10;Cumulative: ${x.cum_pnl >= 0?'+':''}$${x.cum_pnl}&#10;Trades: ${x.trades} (${x.wins} W)</title>
+     </circle>`
+  ).join('');
+
+  const totalH = H + BH + 16;
+  const svg = `
+  <svg viewBox="0 0 ${W} ${totalH}" style="width:100%;max-width:${W}px;display:block;margin:0 auto">
+    <defs>
+      <linearGradient id="fill-grad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="${totalPnl>=0?'#22c55e':'#ef4444'}" stop-opacity="0.25"/>
+        <stop offset="100%" stop-color="${totalPnl>=0?'#22c55e':'#ef4444'}" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    <!-- grid lines -->
+    ${yLabels.map(l=>`
+      <line x1="${pad.l}" y1="${l.y.toFixed(1)}" x2="${W-pad.r}" y2="${l.y.toFixed(1)}"
+            stroke="var(--border)" stroke-width="1" ${l.label==='0.0'?'':'stroke-dasharray="3,3"'}/>
+      <text x="${(pad.l-6).toFixed(1)}" y="${(l.y+4).toFixed(1)}" text-anchor="end"
+            fill="var(--muted)" font-size="10">${l.label==='0.0'?'$0':l.label}</text>`).join('')}
+    <!-- fill area -->
+    <path d="${fillPath}" fill="url(#fill-grad)"/>
+    <!-- line -->
+    <path d="${linePath}" fill="none" stroke="${totalPnl>=0?'var(--green)':'var(--red)'}" stroke-width="2" stroke-linejoin="round"/>
+    <!-- dots -->
+    ${dots}
+    <!-- x labels -->
+    ${xLabels.map(l=>`<text x="${l.x.toFixed(1)}" y="${(H-4).toFixed(1)}" text-anchor="middle" fill="var(--muted)" font-size="10">${l.label}</text>`).join('')}
+    <!-- daily bars -->
+    <text x="${pad.l}" y="${(H+6).toFixed(1)}" fill="var(--muted)" font-size="10">Daily P&amp;L</text>
+    ${bars}
+  </svg>`;
+
+  body.innerHTML = `
+    <div style="display:flex;gap:24px;padding:16px 20px 4px;flex-wrap:wrap">
+      <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Cumulative P&L</div>
+           <div style="font-size:22px;font-weight:700;color:${pnlColor}">${sign}$${Math.abs(totalPnl).toFixed(2)}</div></div>
+      <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Win Rate</div>
+           <div style="font-size:22px;font-weight:700">${winRate}${winRate!=='—'?'%':''}</div></div>
+      <div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Resolved Trades</div>
+           <div style="font-size:22px;font-weight:700">${allTrades}</div></div>
+      <div style="margin-left:auto;display:flex;align-items:flex-end">${resetNote}</div>
+    </div>
+    <div style="padding:8px 12px">${svg}</div>
+    <div style="padding:4px 20px 8px;font-size:11px;color:var(--muted)">Hover dots for daily details</div>`;
+}
+
+document.getElementById('chart-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeChart();
+});
 
 // Allow Enter key to submit form
 document.addEventListener('keydown', e => {

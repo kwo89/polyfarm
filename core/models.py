@@ -103,6 +103,7 @@ class BotRegistry(Base):
     research_spec_id = Column(String)
     last_activity_at = Column(DateTime)
     total_trades = Column(Integer, default=0)
+    reset_at = Column(DateTime, default=None)   # when bot was last reset; P&L counts from here
 
 
 # ─── DEDUPLICATION ────────────────────────────────────────────────────────────
