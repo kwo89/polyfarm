@@ -280,7 +280,7 @@ def api_add_bot(name: str, wallet: str, our_capital: float, poll_interval: int =
 
 
 def api_update_bot(bot_id: str, action: str, new_name: str = "", amount: float = 0.0) -> dict:
-    """pause | unpause | deactivate | rename | deposit"""
+    """pause | unpause | deactivate | rename | deposit | withdraw"""
     with get_session() as session:
         bot = session.get(BotRegistry, bot_id)
         if not bot:
@@ -345,6 +345,31 @@ def api_update_bot(bot_id: str, action: str, new_name: str = "", amount: float =
                 })
             ))
             return {"success": True, "message": f"Added ${amount:.2f} to '{name}'. New capital: ${bot.our_capital:.2f}. P&L history unchanged."}
+        elif action == "withdraw":
+            if amount <= 0:
+                return {"error": "Withdrawal amount must be greater than $0."}
+            old_initial = bot.initial_capital or bot.our_capital or 0.0
+            old_capital = bot.our_capital or 0.0
+            if amount >= old_capital:
+                return {"error": f"Cannot withdraw ${amount:.2f} — current capital is ${old_capital:.2f}. Leave at least $1."}
+            bot.initial_capital = round(max(old_initial - amount, 1.0), 2)
+            bot.our_capital     = round(old_capital - amount, 2)
+            from core.models import HealthEvent
+            session.add(HealthEvent(
+                component=f"capital_withdraw:{name}",
+                event_type="capital_withdraw",
+                details=json.dumps({
+                    "bot_name":      name,
+                    "withdraw_usd":  amount,
+                    "old_initial":   old_initial,
+                    "new_initial":   bot.initial_capital,
+                    "old_capital":   old_capital,
+                    "new_capital":   bot.our_capital,
+                    "note":          "Capital withdrawn by user. P&L base lowered — withdrawal not counted as loss.",
+                    "withdrawn_at":  datetime.utcnow().isoformat(),
+                })
+            ))
+            return {"success": True, "message": f"Withdrew ${amount:.2f} from '{name}'. New capital: ${bot.our_capital:.2f}. P&L history unchanged."}
         else:
             return {"error": f"Unknown action: {action}"}
     return {"success": True, "message": f"Bot '{name}' {action}d."}
@@ -1266,6 +1291,7 @@ async function loadBots() {
           : `<button class="btn-sm btn-pause"   onclick="updateBot('${b.id}','pause')">Pause</button>`)
         + `<button class="btn-sm" style="background:rgba(99,102,241,.12);color:var(--accent);border:1px solid rgba(99,102,241,.3)" onclick="renameBot('${b.id}','${b.name}')">Rename</button>`
         + `<button class="btn-sm" style="background:rgba(34,197,94,.1);color:var(--green);border:1px solid rgba(34,197,94,.3)" onclick="depositCapital('${b.id}','${b.name}',${b.our_capital})">+ Capital</button>`
+        + `<button class="btn-sm" style="background:rgba(239,68,68,.08);color:var(--red);border:1px solid rgba(239,68,68,.25)" onclick="withdrawCapital('${b.id}','${b.name}',${b.our_capital})">– Capital</button>`
         + `<button class="btn-sm" style="background:rgba(239,68,68,.08);color:var(--red);border:1px solid rgba(239,68,68,.25)" onclick="resetBot('${b.id}','${b.name}')">Reset</button>`
         + `<button class="btn-sm btn-deactivate" onclick="confirmDeactivate('${b.id}','${b.name}')">Deactivate</button>`
         + `<a href="https://polymarket.com/profile/${b.target}" target="_blank" rel="noopener"
@@ -1362,6 +1388,20 @@ async function depositCapital(botId, name, currentCapital) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ bot_id: botId, action: 'deposit', amount }),
+  }).then(r => r.json());
+  if (res.error) alert(res.error);
+  else { alert(res.message); loadBots(); }
+}
+
+async function withdrawCapital(botId, name, currentCapital) {
+  const input = prompt(`Withdraw capital from "${name}" (current: $${currentCapital.toFixed(2)})\n\nEnter amount to withdraw ($):`);
+  if (!input) return;
+  const amount = parseFloat(input);
+  if (isNaN(amount) || amount <= 0) { alert('Enter a valid amount greater than $0.'); return; }
+  const res = await fetch('/api/update_bot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bot_id: botId, action: 'withdraw', amount }),
   }).then(r => r.json());
   if (res.error) alert(res.error);
   else { alert(res.message); loadBots(); }
