@@ -164,6 +164,10 @@ class CopyBot:
             logger.debug("[%s] Skipping tx %s: size=0", self.name, tx_hash[:8])
             return
 
+        if target_size < 1.0:
+            logger.debug("[%s] Skipping tx %s: target size $%.2f < $1.00", self.name, tx_hash[:8], target_size)
+            return
+
         # Calculate scaled size
         portfolio_balance = self._get_portfolio_balance()
         target_daily_capital = self._estimate_target_capital()
