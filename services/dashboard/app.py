@@ -1127,10 +1127,10 @@ BOTS_HTML = """<!DOCTYPE html>
     <div style="overflow-x:auto">
       <table>
         <thead><tr>
-          <th>Status</th><th>Name</th><th>Wallet</th>
+          <th>St.</th><th>Name</th><th>Wallet</th>
           <th>Capital</th><th>Target Daily Vol</th><th>Ratio</th>
           <th>Sizing Buckets</th>
-          <th>Mode</th><th>Trades</th><th>Last Active</th><th>Actions</th>
+          <th>Trades</th><th>Actions</th>
         </tr></thead>
         <tbody id="bots-tbody"><tr><td colspan="10" style="text-align:center;padding:30px;color:var(--muted)">Loading…</td></tr></tbody>
       </table>
@@ -1151,7 +1151,7 @@ async function loadBots() {
   }
 
   tb.innerHTML = bots.map(b => {
-    const statusLabel = !b.active ? 'Inactive' : b.paused ? 'Paused' : 'Running';
+    const statusLabel = !b.active ? 'Inactive' : b.paused ? 'Paused' : '';
     const dotCls      = !b.active ? 'inactive' : b.paused ? 'paused' : 'active';
     const shortWallet = b.target.slice(0, 6) + '…' + b.target.slice(-6);
     const ratio       = b.ratio_pct.toFixed(1) + '%';
@@ -1173,16 +1173,16 @@ async function loadBots() {
       : `<span style="font-size:11px;color:var(--yellow)">Calibrating…</span>`;
 
     return `<tr>
-      <td><span class="dot ${dotCls}"></span>${statusLabel}</td>
+      <td style="text-align:center" title="${!b.active ? 'Inactive' : b.paused ? 'Paused' : 'Running'}">
+        <span class="dot ${dotCls}"></span>${statusLabel ? `<span style="font-size:11px;color:var(--muted)">${statusLabel}</span>` : ''}
+      </td>
       <td style="font-weight:600">${b.name}</td>
       <td class="mono" title="${b.target}">${shortWallet}</td>
       <td>$${b.our_capital.toFixed(0)}</td>
       <td style="color:var(--muted)">$${b.target_daily_capital.toFixed(0)}/day</td>
       <td style="font-weight:600;color:var(--blue)">${ratio}</td>
       <td>${bucketsCell}</td>
-      <td><span class="pill ${b.paper_mode ? 'paper' : 'live'}">${b.paper_mode ? 'Paper' : 'Live'}</span></td>
       <td>${b.total_trades}</td>
-      <td style="color:var(--muted);font-size:12px">${b.last_activity}</td>
       <td><div class="actions">${actions}</div></td>
     </tr>`;
   }).join('');
