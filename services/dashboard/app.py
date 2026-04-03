@@ -112,7 +112,8 @@ def get_dashboard_data(days: int = 7) -> dict:
             }
             for b in bots_raw
         ]
-        bot_names = {b.id: b.name for b in bots_raw}
+        bot_names  = {b.id: b.name for b in bots_raw}
+        reset_at_map = {b.id: b.reset_at for b in bots_raw if b.reset_at}
 
         # Fetch all trades in window — frontend handles pagination
         paper_raw = session.execute(
@@ -146,6 +147,7 @@ def get_dashboard_data(days: int = 7) -> dict:
                 "pnl": round(t.hypothetical_pnl, 2) if t.hypothetical_pnl is not None else None,
             }
             for t in paper_raw
+            if not (reset_at_map.get(t.bot_id) and t.created_at and t.created_at < reset_at_map[t.bot_id])
         ]
 
         skip_raw = session.execute(
@@ -192,6 +194,7 @@ def get_dashboard_data(days: int = 7) -> dict:
              "trades": r.num_trades, "volume": round(r.total_traded_usd or 0, 2),
              "pnl": round(r.realized_pnl or 0, 2)}
             for r in daily_raw
+            if not (reset_at_map.get(r.bot_id) and r.date < reset_at_map[r.bot_id].strftime("%Y-%m-%d"))
         ]
 
         mode_row = session.get(SystemConfig, "trading_mode")
