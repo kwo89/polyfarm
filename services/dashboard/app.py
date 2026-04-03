@@ -165,31 +165,34 @@ def get_dashboard_data(days: int = 7) -> dict:
         ]
 
         skip_raw = session.execute(
-            select(TargetTrade.skip_reason, func.count(TargetTrade.id))
+            select(TargetTrade.bot_id, TargetTrade.skip_reason, TargetTrade.detected_at)
             .where(TargetTrade.status == "skipped").where(TargetTrade.detected_at >= since)
-            .group_by(TargetTrade.skip_reason)
         ).all()
-        skip_counts = {r or "unknown": c for r, c in skip_raw}
+        skip_counts = {}
+        for row in skip_raw:
+            reset = reset_at_map.get(row.bot_id)
+            if reset and row.detected_at and row.detected_at < reset:
+                continue
+            key = row.skip_reason or "unknown"
+            skip_counts[key] = skip_counts.get(key, 0) + 1
 
-        # Per-bot skipped counts
-        skipped_by_bot_raw = session.execute(
-            select(TargetTrade.bot_id, func.count(TargetTrade.id))
-            .where(TargetTrade.status == "skipped").where(TargetTrade.detected_at >= since)
-            .group_by(TargetTrade.bot_id)
-        ).all()
-        skipped_by_bot = {bot_names.get(bid, bid): cnt for bid, cnt in skipped_by_bot_raw}
-
-        # Per-bot detected counts
-        detected_by_bot_raw = session.execute(
-            select(TargetTrade.bot_id, func.count(TargetTrade.id))
+        # Per-bot skipped/detected counts — filtered by reset_at in Python
+        target_raw = session.execute(
+            select(TargetTrade.bot_id, TargetTrade.detected_at, TargetTrade.status)
             .where(TargetTrade.detected_at >= since)
-            .group_by(TargetTrade.bot_id)
         ).all()
-        detected_by_bot = {bot_names.get(bid, bid): cnt for bid, cnt in detected_by_bot_raw}
-
-        total_detected = session.execute(
-            select(func.count(TargetTrade.id)).where(TargetTrade.detected_at >= since)
-        ).scalar_one() or 0
+        skipped_by_bot = {}
+        detected_by_bot = {}
+        total_detected = 0
+        for row in target_raw:
+            reset = reset_at_map.get(row.bot_id)
+            if reset and row.detected_at and row.detected_at < reset:
+                continue
+            bot_name = bot_names.get(row.bot_id, row.bot_id[:8] if row.bot_id else "?")
+            detected_by_bot[bot_name] = detected_by_bot.get(bot_name, 0) + 1
+            total_detected += 1
+            if row.status == "skipped":
+                skipped_by_bot[bot_name] = skipped_by_bot.get(bot_name, 0) + 1
 
         # Stats derived from status field — accurate for all cases
         resolved = [t for t in paper_trades if t["status"] != "pending"]
