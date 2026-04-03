@@ -22,9 +22,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 
-from sqlalchemy import select, func, desc
+from sqlalchemy import select, func, desc, text
 from core.database import init_db, get_session
-from core.models import BotRegistry, PaperTrade, TargetTrade, DailyPnl, SystemConfig
+from core.models import BotRegistry, PaperTrade, TargetTrade, DailyPnl, SystemConfig, SeenTransaction, Position, Order
 
 PORT = int(os.environ.get("DASHBOARD_PORT", 8080))
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "")
@@ -280,7 +280,7 @@ def api_add_bot(name: str, wallet: str, our_capital: float, poll_interval: int =
 
 
 def api_update_bot(bot_id: str, action: str, new_name: str = "", amount: float = 0.0) -> dict:
-    """pause | unpause | deactivate | rename | deposit | withdraw"""
+    """pause | unpause | deactivate | rename | deposit | withdraw | delete"""
     with get_session() as session:
         bot = session.get(BotRegistry, bot_id)
         if not bot:
@@ -370,6 +370,16 @@ def api_update_bot(bot_id: str, action: str, new_name: str = "", amount: float =
                 })
             ))
             return {"success": True, "message": f"Withdrew ${amount:.2f} from '{name}'. New capital: ${bot.our_capital:.2f}. P&L history unchanged."}
+        elif action == "delete":
+            # Delete all child records first (FK constraints), then the bot
+            session.execute(text("DELETE FROM seen_transactions WHERE bot_id = :id"), {"id": bot_id})
+            session.execute(text("DELETE FROM paper_trades WHERE bot_id = :id"), {"id": bot_id})
+            session.execute(text("DELETE FROM target_trades WHERE bot_id = :id"), {"id": bot_id})
+            session.execute(text("DELETE FROM daily_pnl WHERE bot_id = :id"), {"id": bot_id})
+            session.execute(text("DELETE FROM positions WHERE bot_id = :id"), {"id": bot_id})
+            session.execute(text("DELETE FROM orders WHERE bot_id = :id"), {"id": bot_id})
+            session.execute(text("DELETE FROM bot_registry WHERE id = :id"), {"id": bot_id})
+            return {"success": True, "message": f"Bot '{name}' and all its data have been permanently deleted."}
         else:
             return {"error": f"Unknown action: {action}"}
     return {"success": True, "message": f"Bot '{name}' {action}d."}
@@ -1296,7 +1306,8 @@ async function loadBots() {
         + `<button class="btn-sm btn-deactivate" onclick="confirmDeactivate('${b.id}','${b.name}')">Deactivate</button>`
         + `<a href="https://polymarket.com/profile/${b.target}" target="_blank" rel="noopener"
               style="display:inline-flex;align-items:center;padding:4px 10px;border-radius:5px;font-size:11px;font-weight:600;background:rgba(99,102,241,.12);color:var(--accent);border:1px solid rgba(99,102,241,.3);text-decoration:none">View ↗</a>`
-      : '<span style="color:var(--muted);font-size:11px">Deactivated</span>';
+      : '<span style="color:var(--muted);font-size:11px">Deactivated</span>'
+        + `<button class="btn-sm" style="background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.4)" onclick="deleteBot('${b.id}','${b.name}')">Delete</button>`;
     const graphBtn = `<button class="btn-sm" style="background:rgba(59,130,246,.12);color:var(--blue);border:1px solid rgba(59,130,246,.3)" onclick="openChart('${b.id}','${b.name}')">Graph</button>`;
 
     const bucketsCell = b.buckets_ready
@@ -1402,6 +1413,18 @@ async function withdrawCapital(botId, name, currentCapital) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ bot_id: botId, action: 'withdraw', amount }),
+  }).then(r => r.json());
+  if (res.error) alert(res.error);
+  else { alert(res.message); loadBots(); }
+}
+
+async function deleteBot(botId, name) {
+  const confirmed = confirm(`⚠️ PERMANENTLY DELETE "${name}"?\n\nThis will erase the bot and ALL its trade history, P&L, and data. This cannot be undone.\n\nType OK to confirm.`);
+  if (!confirmed) return;
+  const res = await fetch('/api/update_bot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bot_id: botId, action: 'delete' }),
   }).then(r => r.json());
   if (res.error) alert(res.error);
   else { alert(res.message); loadBots(); }
