@@ -732,6 +732,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div class="footer">PolyFarm · auto-refreshes every 30s</div>
 </div>
+
+<!-- Chart modal -->
+<div id="chart-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;overflow-y:auto">
+  <div style="max-width:780px;margin:40px auto;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);overflow:hidden">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid var(--border)">
+      <div id="chart-title" style="font-weight:700;font-size:15px"></div>
+      <button onclick="closeChart()" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:0 4px">✕</button>
+    </div>
+    <div id="chart-body"></div>
+  </div>
+</div>
+
 <script>
 let allTrades = [];
 let filteredTrades = [];
@@ -1112,17 +1124,6 @@ function renderChart(d) {
 loadData();
 setInterval(loadData, 30000);
 </script>
-
-<!-- Chart modal -->
-<div id="chart-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;overflow-y:auto">
-  <div style="max-width:780px;margin:40px auto;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);overflow:hidden">
-    <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid var(--border)">
-      <div id="chart-title" style="font-weight:700;font-size:15px"></div>
-      <button onclick="closeChart()" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:0 4px">✕</button>
-    </div>
-    <div id="chart-body"></div>
-  </div>
-</div>
 </body></html>"""
 
 
