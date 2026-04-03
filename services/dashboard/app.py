@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 
-from sqlalchemy import select, func, desc, text
+from sqlalchemy import select, func, desc, text, case
 from core.database import init_db, get_session
 from core.models import BotRegistry, PaperTrade, TargetTrade, DailyPnl, SystemConfig, SeenTransaction, Position, Order
 
@@ -388,21 +388,50 @@ def api_update_bot(bot_id: str, action: str, new_name: str = "", amount: float =
 def get_all_bots() -> list:
     with get_session() as session:
         bots = session.execute(select(BotRegistry).order_by(BotRegistry.active.desc())).scalars().all()
-        return [
-            {
+
+        # Single query: per-bot realized P&L, locked capital, resolved/pending counts
+        stats_rows = session.execute(
+            select(
+                PaperTrade.bot_id,
+                func.coalesce(func.sum(
+                    case((PaperTrade.market_resolved == True, PaperTrade.hypothetical_pnl), else_=0)
+                ), 0).label("realized_pnl"),
+                func.coalesce(func.sum(
+                    case((PaperTrade.market_resolved == False, PaperTrade.hypothetical_value), else_=0)
+                ), 0).label("locked"),
+                func.sum(case((PaperTrade.market_resolved == True, 1), else_=0)).label("resolved_count"),
+                func.sum(case((PaperTrade.market_resolved == False, 1), else_=0)).label("pending_count"),
+            ).group_by(PaperTrade.bot_id)
+        ).all()
+        stats = {r.bot_id: r for r in stats_rows}
+
+        result = []
+        for b in bots:
+            s = stats.get(b.id)
+            initial   = b.initial_capital or b.our_capital or 0
+            realized  = round(float(s.realized_pnl), 2) if s else 0.0
+            locked    = round(float(s.locked), 2)       if s else 0.0
+            resolved  = int(s.resolved_count)           if s else 0
+            pending   = int(s.pending_count)            if s else 0
+            liquid    = round(initial + realized - locked, 2)
+            result.append({
                 "id": b.id, "name": b.name, "target": b.target_address,
                 "active": b.active, "paused": b.paused, "paper_mode": b.paper_mode,
                 "our_capital": b.our_capital or 0,
-                "initial_capital": b.initial_capital or b.our_capital or 0,
+                "initial_capital": initial,
+                "liquid_capital": liquid,
+                "realized_pnl": realized,
+                "locked_capital": locked,
+                "resolved_count": resolved,
+                "pending_count": pending,
                 "target_daily_capital": b.target_daily_capital or 0,
                 "total_trades": b.total_trades or 0,
                 "last_activity": b.last_activity_at.strftime("%Y-%m-%d %H:%M UTC") if b.last_activity_at else "Never",
                 "buckets": [b.bucket_t1, b.bucket_t2, b.bucket_t3, b.bucket_t4],
                 "buckets_ready": all(x is not None for x in [b.bucket_t1, b.bucket_t2, b.bucket_t3, b.bucket_t4]),
                 "reset_at": b.reset_at.isoformat() if b.reset_at else None,
-            }
-            for b in bots
-        ]
+            })
+        return result
 
 
 def get_bot_chart_data(bot_id: str) -> dict:
@@ -1424,7 +1453,15 @@ async function loadBots() {
       </td>
       <td style="font-weight:600">${b.name}</td>
       <td class="mono" title="${b.target}">${shortWallet}</td>
-      <td>$${b.our_capital.toFixed(0)}</td>
+      <td>
+        <div style="font-weight:600;color:${b.liquid_capital < 0 ? 'var(--red)' : 'var(--text)'}">$${b.liquid_capital.toFixed(2)}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px">
+          🔒 $${b.locked_capital.toFixed(2)} locked &nbsp;·&nbsp;
+          <span style="color:var(--green)">${b.resolved_count} resolved</span> /
+          <span style="color:var(--yellow)">${b.pending_count} pending</span>
+        </div>
+        <div style="font-size:10px;color:var(--muted)">start $${b.initial_capital.toFixed(2)} · p&l ${b.realized_pnl >= 0 ? '+' : ''}$${b.realized_pnl.toFixed(2)}</div>
+      </td>
       <td style="color:var(--muted)">$${b.target_daily_capital.toFixed(0)}/day</td>
       <td>${bucketsCell}</td>
       <td>${b.total_trades}</td>
