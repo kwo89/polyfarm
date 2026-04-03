@@ -128,7 +128,7 @@ def calculate_scaled_size(
             tier = 3
         else:
             tier = 4
-        size = round(our_balance * TIER_PCTS[tier])   # round to nearest whole dollar
+        size = round(our_balance * TIER_PCTS[tier], 2)
         return size if size >= MIN_TRADE_SIZE_USD else 0.0
 
     # Fallback: proportional (used until first bucket calibration completes)
