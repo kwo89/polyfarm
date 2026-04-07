@@ -1203,6 +1203,12 @@ function renderChart(d) {
 
 loadData();
 setInterval(loadData, 30000);
+
+// Refresh immediately when the tab becomes visible again (browser pauses
+// timers on hidden tabs, so coming back can show stale data)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') loadData();
+});
 </script>
 </body></html>"""
 
