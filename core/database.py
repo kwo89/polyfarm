@@ -24,6 +24,8 @@ def _get_engine():
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA cache_size=-32000")   # 32 MB page cache (negative = KB)
+        cursor.execute("PRAGMA temp_store=MEMORY")   # temp tables in RAM
         cursor.close()
 
     return engine
@@ -53,6 +55,13 @@ def _migrate():
         "ALTER TABLE bot_registry ADD COLUMN bucket_t3 REAL DEFAULT NULL",
         "ALTER TABLE bot_registry ADD COLUMN bucket_t4 REAL DEFAULT NULL",
         "ALTER TABLE bot_registry ADD COLUMN reset_at TEXT DEFAULT NULL",
+        # Performance indexes — CREATE INDEX IF NOT EXISTS is safe to re-run
+        "CREATE INDEX IF NOT EXISTS idx_paper_trades_bot_created ON paper_trades(bot_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_paper_trades_resolved ON paper_trades(market_resolved)",
+        "CREATE INDEX IF NOT EXISTS idx_target_trades_bot_detected ON target_trades(bot_id, detected_at)",
+        "CREATE INDEX IF NOT EXISTS idx_target_trades_status ON target_trades(status, detected_at)",
+        "CREATE INDEX IF NOT EXISTS idx_daily_pnl_bot_date ON daily_pnl(bot_id, date)",
+        "CREATE INDEX IF NOT EXISTS idx_seen_tx_bot ON seen_transactions(bot_id)",
     ]
     with engine.connect() as conn:
         for sql in migrations:
@@ -60,7 +69,7 @@ def _migrate():
                 conn.execute(text(sql))
                 conn.commit()
             except Exception:
-                pass  # Column already exists — safe to ignore
+                pass  # Column already exists / index already exists — safe to ignore
 
 
 @contextmanager

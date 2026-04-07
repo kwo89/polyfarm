@@ -129,10 +129,11 @@ def get_dashboard_data(days: int = 7) -> dict:
         bot_names  = {b.id: b.name for b in bots_raw}
         reset_at_map = {b.id: b.reset_at for b in bots_raw if b.reset_at}
 
-        # Fetch all trades in window — frontend handles pagination
+        # Fetch trades in window — capped at 2000 rows for dashboard display
         paper_raw = session.execute(
             select(PaperTrade).where(PaperTrade.created_at >= since)
             .order_by(desc(PaperTrade.created_at))
+            .limit(2000)
         ).scalars().all()
 
         # Fetch target sizes for each paper trade (what the wallet actually traded)
@@ -164,35 +165,33 @@ def get_dashboard_data(days: int = 7) -> dict:
             if not (reset_at_map.get(t.bot_id) and t.created_at and t.created_at < reset_at_map[t.bot_id])
         ]
 
-        skip_raw = session.execute(
-            select(TargetTrade.bot_id, TargetTrade.skip_reason, TargetTrade.detected_at)
-            .where(TargetTrade.status == "skipped").where(TargetTrade.detected_at >= since)
-        ).all()
-        skip_counts = {}
-        for row in skip_raw:
-            reset = reset_at_map.get(row.bot_id)
-            if reset and row.detected_at and row.detected_at < reset:
-                continue
-            key = row.skip_reason or "unknown"
-            skip_counts[key] = skip_counts.get(key, 0) + 1
+        # Aggregate skip/detect counts in SQL — JOIN on bot_registry for reset_at filtering.
+        # Single pass over target_trades instead of two Python loops.
+        target_agg = session.execute(text("""
+            SELECT
+                tt.bot_id,
+                tt.status,
+                tt.skip_reason,
+                COUNT(*) AS cnt
+            FROM target_trades tt
+            JOIN bot_registry br ON br.id = tt.bot_id
+            WHERE tt.detected_at >= :since
+              AND tt.detected_at >= COALESCE(br.reset_at, '1970-01-01')
+            GROUP BY tt.bot_id, tt.status, tt.skip_reason
+        """), {"since": since}).all()
 
-        # Per-bot skipped/detected counts — filtered by reset_at in Python
-        target_raw = session.execute(
-            select(TargetTrade.bot_id, TargetTrade.detected_at, TargetTrade.status)
-            .where(TargetTrade.detected_at >= since)
-        ).all()
+        skip_counts = {}
         skipped_by_bot = {}
         detected_by_bot = {}
         total_detected = 0
-        for row in target_raw:
-            reset = reset_at_map.get(row.bot_id)
-            if reset and row.detected_at and row.detected_at < reset:
-                continue
+        for row in target_agg:
             bot_name = bot_names.get(row.bot_id, row.bot_id[:8] if row.bot_id else "?")
-            detected_by_bot[bot_name] = detected_by_bot.get(bot_name, 0) + 1
-            total_detected += 1
+            detected_by_bot[bot_name] = detected_by_bot.get(bot_name, 0) + row.cnt
+            total_detected += row.cnt
             if row.status == "skipped":
-                skipped_by_bot[bot_name] = skipped_by_bot.get(bot_name, 0) + 1
+                skipped_by_bot[bot_name] = skipped_by_bot.get(bot_name, 0) + row.cnt
+                key = row.skip_reason or "unknown"
+                skip_counts[key] = skip_counts.get(key, 0) + row.cnt
 
         # Stats derived from status field — accurate for all cases
         resolved = [t for t in paper_trades if t["status"] != "pending"]
@@ -293,6 +292,7 @@ def api_add_bot(name: str, wallet: str, our_capital: float, poll_interval: int =
         if new_bot:
             threading.Thread(target=_initial_calibrate, args=(new_bot.id,), daemon=True).start()
 
+    _invalidate_bots_cache()
     return {"success": True, "message": f"Bot '{name}' registered. Calibrating buckets now — will start trading within 30 seconds."}
 
 
@@ -396,57 +396,69 @@ def api_update_bot(bot_id: str, action: str, new_name: str = "", amount: float =
             session.execute(text("DELETE FROM positions WHERE bot_id = :id"), {"id": bot_id})
             session.execute(text("DELETE FROM orders WHERE bot_id = :id"), {"id": bot_id})
             session.execute(text("DELETE FROM bot_registry WHERE id = :id"), {"id": bot_id})
+            _invalidate_bots_cache()
             return {"success": True, "message": f"Bot '{name}' and all its data have been permanently deleted."}
         else:
             return {"error": f"Unknown action: {action}"}
+    _invalidate_bots_cache()
     return {"success": True, "message": f"Bot '{name}' {action}d."}
 
 
+_all_bots_cache: dict = {"ts": 0.0, "data": None}
+_ALL_BOTS_TTL = 8  # seconds — stale-while-revalidate window
+
+
 def get_all_bots() -> list:
+    import time as _time
+    now = _time.monotonic()
+    if _all_bots_cache["data"] is not None and (now - _all_bots_cache["ts"]) < _ALL_BOTS_TTL:
+        return _all_bots_cache["data"]
+
+    result = _get_all_bots_fresh()
+    _all_bots_cache["ts"] = now
+    _all_bots_cache["data"] = result
+    return result
+
+
+def _invalidate_bots_cache():
+    """Call after any bot mutation so the next request sees fresh data."""
+    _all_bots_cache["ts"] = 0.0
+    _all_bots_cache["data"] = None
+
+
+def _get_all_bots_fresh() -> list:
     with get_session() as session:
         bots = session.execute(select(BotRegistry).order_by(BotRegistry.active.desc())).scalars().all()
 
-        # Build reset_at map for filtering
-        reset_at_map = {b.id: b.reset_at for b in bots if b.reset_at}
-
-        # Per-bot stats — one row per bot, filtered by reset_at in Python after fetch
-        all_trades = session.execute(
-            select(
-                PaperTrade.bot_id,
-                PaperTrade.market_resolved,
-                PaperTrade.hypothetical_pnl,
-                PaperTrade.hypothetical_value,
-                PaperTrade.created_at,
-            )
-        ).all()
-
-        # Aggregate per bot, respecting reset_at
-        from collections import defaultdict
-        agg = defaultdict(lambda: {"realized_pnl": 0.0, "locked": 0.0, "pending_count": 0, "resolved_count": 0})
-        for row in all_trades:
-            reset = reset_at_map.get(row.bot_id)
-            if reset and row.created_at and row.created_at < reset:
-                continue
-            a = agg[row.bot_id]
-            if row.market_resolved:
-                a["realized_pnl"] += row.hypothetical_pnl or 0.0
-                a["resolved_count"] += 1
-            else:
-                a["locked"] += row.hypothetical_value or 0.0
-                a["pending_count"] += 1
+        # Efficient aggregation in SQL — JOIN on bot_registry so reset_at filtering
+        # happens inside the DB engine rather than pulling all rows to Python.
+        # COALESCE(br.reset_at, '1970-01-01') means "all trades" for non-reset bots.
+        agg_rows = session.execute(text("""
+            SELECT
+                pt.bot_id,
+                SUM(CASE WHEN pt.market_resolved = 1 THEN COALESCE(pt.hypothetical_pnl, 0) ELSE 0 END) AS realized_pnl,
+                SUM(CASE WHEN pt.market_resolved = 0 THEN COALESCE(pt.hypothetical_value, 0) ELSE 0 END) AS locked,
+                SUM(CASE WHEN pt.market_resolved = 1 THEN 1 ELSE 0 END) AS resolved_count,
+                SUM(CASE WHEN pt.market_resolved = 0 THEN 1 ELSE 0 END) AS pending_count
+            FROM paper_trades pt
+            JOIN bot_registry br ON br.id = pt.bot_id
+            WHERE pt.created_at >= COALESCE(br.reset_at, '1970-01-01')
+            GROUP BY pt.bot_id
+        """)).all()
+        agg = {row.bot_id: row for row in agg_rows}
 
         result = []
         for b in bots:
-            a       = agg.get(b.id, {})
-            initial = b.initial_capital or b.our_capital or 0
-            realized = round(a.get("realized_pnl", 0.0), 2)
-            locked   = round(a.get("locked", 0.0), 2)
-            resolved = a.get("resolved_count", 0)
-            pending  = a.get("pending_count", 0)
+            a        = agg.get(b.id)
+            initial  = b.initial_capital or b.our_capital or 0
+            realized = round(float(a.realized_pnl) if a else 0.0, 2)
+            locked   = round(float(a.locked) if a else 0.0, 2)
+            resolved = int(a.resolved_count) if a else 0
+            pending  = int(a.pending_count) if a else 0
             # Capital = starting capital + resolved P&L (no locked subtraction —
             # paper trading doesn't actually lock capital; subtracting all open
             # positions produces misleadingly large negatives as trades accumulate)
-            capital = round(initial + realized, 2)
+            capital  = round(initial + realized, 2)
             result.append({
                 "id": b.id, "name": b.name, "target": b.target_address,
                 "active": b.active, "paused": b.paused, "paper_mode": b.paper_mode,
