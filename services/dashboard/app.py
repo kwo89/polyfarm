@@ -129,11 +129,10 @@ def get_dashboard_data(days: int = 7) -> dict:
         bot_names  = {b.id: b.name for b in bots_raw}
         reset_at_map = {b.id: b.reset_at for b in bots_raw if b.reset_at}
 
-        # Fetch trades in window — capped at 2000 rows for dashboard display
+        # Fetch all trades in window — 7-day filter + indexes keep this fast
         paper_raw = session.execute(
             select(PaperTrade).where(PaperTrade.created_at >= since)
             .order_by(desc(PaperTrade.created_at))
-            .limit(2000)
         ).scalars().all()
 
         # Fetch target sizes for each paper trade (what the wallet actually traded)
